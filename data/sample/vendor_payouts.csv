@@ -1,0 +1,13 @@
+payout_id,payout_date,vendor_id,vendor_name,transaction_id,amount,currency,status,payment_method
+PAY-2001,2026-07-06,V001,CloudScale Systems,TXN-1001,185000,INR,completed,Bank Transfer
+PAY-2002,2026-07-13,V002,PeopleBridge Services,TXN-1002,92000,INR,completed,Bank Transfer
+PAY-2003,2026-07-20,V003,Orbit Travel Desk,TXN-1003,48000,INR,completed,Corporate Card
+PAY-2004,2026-07-29,V004,Northstar Consulting,TXN-1004,135000,INR,processing,Bank Transfer
+PAY-2005,2026-08-05,V001,CloudScale Systems,TXN-1005,192000,INR,completed,Bank Transfer
+PAY-2006,2026-08-09,V002,PeopleBridge Services,TXN-1006,92000,INR,completed,Bank Transfer
+PAY-2007,2026-08-14,V003,Orbit Travel Desk,TXN-1007,61500,INR,processing,Corporate Card
+PAY-2008,2026-08-18,V004,Northstar Consulting,TXN-1008,138000,INR,completed,Bank Transfer
+PAY-2009,2026-08-23,V005,PaperTrail Supplies,TXN-1009,16750,INR,failed,Bank Transfer
+PAY-2010,2026-08-26,V006,SecureStack Labs,TXN-1010,420000,INR,processing,Bank Transfer
+PAY-2011,2026-08-30,V001,CloudScale Systems,TXN-1011,38500,INR,scheduled,Bank Transfer
+
