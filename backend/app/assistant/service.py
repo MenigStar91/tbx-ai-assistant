@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import date
 
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ return {"clarification":"specific question"}. Otherwise return only JSON matchin
 {"dataset":str,"operation":"list|count|sum|average|minimum|maximum","measure":str|null,
 "group_by":[str],"filters":[{"column":str,"operator":"eq|neq|contains|gte|lte|gt|lt","value":any}],"limit":int}
 AVAILABLE_DATASETS_JSON=__CATALOG__
+TODAY=__TODAY__
 """
 
 EXPLAINER_PROMPT = """GROUNDED_EXPLAINER
@@ -47,7 +49,8 @@ class AssistantService:
                 confidence="low",
                 clarification_needed=True,
             )
-        planner_messages = [Message(role="system", content=PLANNER_PROMPT.replace("__CATALOG__", json.dumps(catalog)))]
+        planner_prompt = PLANNER_PROMPT.replace("__CATALOG__", json.dumps(catalog)).replace("__TODAY__", date.today().isoformat())
+        planner_messages = [Message(role="system", content=planner_prompt)]
         planner_messages.extend(request.history[-12:])
         planner_messages.append(Message(role="user", content=request.message))
         planned = await self.provider.generate(planner_messages)
