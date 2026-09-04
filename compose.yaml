@@ -3,7 +3,7 @@ services:
     build: ./backend
     env_file: .env
     ports: ["8000:8000"]
-    volumes: ["./backend:/app"]
+    volumes: ["./backend:/app", "./data/uploads:/app/data/uploads"]
     depends_on: [db]
   web:
     build: ./frontend
@@ -21,4 +21,3 @@ services:
     volumes: ["postgres_data:/var/lib/postgresql/data"]
 volumes:
   postgres_data:
-

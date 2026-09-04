@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     sarvam_base_url: str = "https://api.sarvam.ai/v1"
     request_timeout_seconds: float = 45.0
     cors_origins: str = "http://localhost:5173"
+    data_directory: str = "data/uploads"
+    max_result_rows: int = 200
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -24,4 +26,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

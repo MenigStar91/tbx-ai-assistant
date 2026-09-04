@@ -12,4 +12,7 @@ dist/
 .vscode/
 coverage/
 *.log
+data/uploads/*
+!data/uploads/.gitkeep
+*.duckdb
 
