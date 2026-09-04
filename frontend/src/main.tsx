@@ -39,7 +39,15 @@ function App() {
       const response = await fetch(`${apiUrl}/api/v1/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, history: prior }),
+        body: JSON.stringify({
+          message: text,
+          history: prior.map((item) => ({
+            role: item.role,
+            content: item.evidence
+              ? `${item.content}\nPrevious grounded context: ${JSON.stringify({ dataset: item.evidence.dataset, calculation: item.evidence.calculation, rows: item.evidence.rows.slice(0, 10) })}`
+              : item.content,
+          })),
+        }),
       });
       if (!response.ok) throw new Error("Assistant unavailable");
       const data = await response.json();
