@@ -20,6 +20,18 @@ An AI assistant for asking plain-language questions about financial operations d
 
 The expected TBX resources include transactions, vendor payouts, reconciliation status, chart of accounts, vendor list and a data dictionary. Their precise schemas are intentionally not assumed.
 
+## Included synthetic demo data
+
+`data/sample/` contains a small, deterministic finance-operations dataset with the same resource categories named by TBX. It is entirely synthetic and is loaded by default through `DATA_DIRECTORY=data/sample`.
+
+Try these immediately in mock mode:
+
+- `How much did we spend on vendor payouts last month?` - computes INR 958,750 from August 2026 payout rows.
+- `Which transactions are unreconciled?` - returns the two matching source transactions.
+- `Break down unreconciled spend by vendor.` - returns a vendor-level computed breakdown.
+
+Mock mode uses a deliberately small rule-based planner for these acceptance paths. It exists for local plumbing tests, not as the final natural-language model.
+
 ## Grounded request flow
 
 ```mermaid
@@ -123,6 +135,14 @@ Do not place placeholder numeric answers in the final presentation. Save the exa
 6. Capture sample questions, query plans, source records and exact answers.
 7. Add anomaly detection only after grounding tests pass.
 8. Prepare the required architecture diagram and presentation deck.
+
+To switch from the synthetic files without changing code:
+
+```env
+DATA_DIRECTORY=data/uploads
+```
+
+Place the official files in `data/uploads/` or upload them through the UI. The synthetic directory remains separate and cannot contaminate official answers.
 
 ## Known starter limitations
 
