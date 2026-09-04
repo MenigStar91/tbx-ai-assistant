@@ -47,6 +47,61 @@ flowchart LR
 
 The language model never calculates totals. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, and only then asks the model to explain the evidence.
 
+## Grounding guardrails
+
+Refusal does not depend on the model volunteering `{"clarification": ...}`.
+Under the lightweight-model constraint the planner is small and eager to produce
+*something*, so these guards refuse structurally, before any model call — which
+means an unanswerable question also costs zero tokens.
+
+| Guard | Fires when | Cost |
+|---|---|---|
+| Unsupported subject | the question uses words that are neither query language nor present in the data | 0 tokens |
+| Forecasting | the question asks about the future | 0 tokens |
+| Unknown named entity | a capitalised name appears nowhere in the loaded data | 0 tokens |
+| Plan validation | the model emits an unknown dataset, column or operation | 1 call |
+| Empty result | no rows match — reported as an honest zero, `confidence: low` | 1 call |
+
+The vocabulary is derived from the live catalog at runtime (column names plus the
+distinct values of low-cardinality text columns), never hardcoded, so it adapts
+to the TBX dataset automatically. A word that genuinely appears in the data —
+`payroll` is a real category in the sample — is not a refusal trigger.
+
+Without the named-entity guard, *"How much did we pay Globex Corporation last
+month?"* silently drops the unknown vendor and returns the total for **every**
+vendor. A confidently wrong number is the failure mode the brief calls a
+liability.
+
+## One model call per question
+
+The planner call is the only model call. The answer sentence is generated from
+the computed evidence by `app/assistant/narrate.py`.
+
+The previous explainer step sent the full evidence JSON — up to 200 rows — into
+the model on every question, which was the largest token cost in the request
+path. Removing it roughly halves spend and removes the last place a figure could
+be garbled, since a template cannot misread a number it was handed.
+
+Ask in Hindi and the same plan, the same SQL and the same number come back; only
+the phrasing changes. Script detection covers Devanagari, Bengali, Gurmukhi,
+Gujarati, Odia, Tamil, Telugu, Kannada and Malayalam.
+
+## Measuring accuracy and cost
+
+```bash
+python evals/run.py                  # in-process, no server needed
+python evals/run.py --provider sarvam
+python evals/run.py --md > EVAL.md
+```
+
+Expected answers in `evals/questions.json` are **independent SQL**, not hardcoded
+numbers, so the question set survives the dataset swap unchanged. Six questions
+must return a correct figure; eight must be refused.
+
+`GET /api/v1/metrics` reports measured tokens and latency per query, broken down
+by model — which is what the model-efficiency criterion and the model-choice
+slide are argued from.
+
 ## Repository structure
 
 ```text

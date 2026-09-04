@@ -40,8 +40,11 @@ class Evidence(BaseModel):
     dataset: str
     columns: list[str]
     rows: list[dict[str, Any]]
-    total_rows: int
+    total_rows: int          # rows matching the filters in the dataset, NOT rows returned
+    returned_rows: int = 0   # rows actually shown, after any limit
+    total_groups: int | None = None
     calculation: str
+    sql: str | None = None
     export_id: str | None = None
 
 
@@ -52,9 +55,29 @@ class ChatResponse(BaseModel):
     confidence: Literal["high", "medium", "low"] = "medium"
     evidence: Evidence | None = None
     clarification_needed: bool = False
+    refusal_reason: str | None = None
+    plan_repairs: list[str] = Field(default_factory=list)
+    language: str = "en"
+    usage: dict[str, Any] | None = None
     tool_executions: list[ToolExecution] = Field(default_factory=list)
     suggested_actions: list[str] = Field(default_factory=list)
 
 
 class ProviderResponse(BaseModel):
     content: str
+    # usage is never optional: "model efficiency" is a scored criterion, so every
+    # call reports what it cost
+    tokens_in: int = 0
+    tokens_out: int = 0
+    latency_ms: int = 0
+    model: str = "unknown"
+
+
+class QueryMetrics(BaseModel):
+    queries: int
+    refusals: int
+    avg_tokens_in: float
+    avg_tokens_out: float
+    avg_tokens_total: float
+    avg_latency_ms: float
+    by_model: list[dict[str, Any]]

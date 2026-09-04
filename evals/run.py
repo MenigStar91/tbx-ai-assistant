@@ -1,0 +1,133 @@
+"""Accuracy and efficiency harness.
+
+Produces the two numbers the pitch is argued from:
+
+    "X% correct on N held-out questions, averaging T tokens per query."
+
+Truth comes from independent SQL executed directly against the datasets, never
+from the engine under test.
+
+    python evals/run.py                       # in-process, default provider
+    python evals/run.py --provider sarvam
+    python evals/run.py --data data/sample
+    python evals/run.py --md > EVAL.md        # paste into the README
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+
+
+def load_questions() -> list[dict]:
+    return json.loads((Path(__file__).parent / "questions.json").read_text())["questions"]
+
+
+def computed_value(response) -> float | None:
+    """The single figure the assistant is asserting, whatever its shape."""
+    evidence = response.evidence
+    if evidence is None:
+        return None
+    if evidence.rows and "result" in evidence.rows[0]:
+        return float(evidence.rows[0]["result"])
+    return float(evidence.total_rows)
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--provider", default=os.environ.get("LLM_PROVIDER", "mock"))
+    parser.add_argument("--data", default=os.environ.get("DATA_DIRECTORY", "data/sample"))
+    parser.add_argument("--md", action="store_true")
+    args = parser.parse_args()
+
+    os.environ["LLM_PROVIDER"] = args.provider
+    os.environ["DATA_DIRECTORY"] = args.data
+
+    from app.assistant.service import AssistantService
+    from app.config import get_settings
+    from app.data.catalog import DatasetCatalog
+    from app.data.metrics import metrics_store
+    from app.providers.factory import create_provider
+    from app.schemas import ChatRequest
+    from app.tools.registry import ToolRegistry
+
+    data_dir = str((ROOT / args.data).resolve())
+    catalog = DatasetCatalog(data_dir)
+    connection = catalog.connection()
+    service = AssistantService(create_provider(get_settings()), ToolRegistry(), catalog)
+
+    metrics_store.reset()
+    results: list[dict] = []
+
+    for item in load_questions():
+        response = await service.respond(ChatRequest(message=item["q"]))
+        refused = response.clarification_needed
+
+        if item.get("expect_refusal"):
+            results.append({
+                "q": item["q"], "kind": "refusal", "pass": refused,
+                "detail": (response.refusal_reason or "refused") if refused
+                          else f"ANSWERED when it should have refused ({computed_value(response)})",
+            })
+            continue
+
+        if refused:
+            results.append({"q": item["q"], "kind": "value", "pass": False,
+                            "detail": f"refused, but the data supports an answer: {response.refusal_reason}"})
+            continue
+
+        sql = item.get("expect_sql") or item["expect_groups_sql"]
+        expected = float(connection.execute(sql).fetchone()[0])
+        actual = (float(response.evidence.total_groups)
+                  if item.get("expect_groups_sql") and response.evidence.total_groups is not None
+                  else computed_value(response))
+        ok = actual is not None and abs(actual - expected) <= max(1e-6, abs(expected) * 1e-6)
+        results.append({"q": item["q"], "kind": "value", "pass": ok,
+                        "detail": f"{actual:g}" if ok else f"got {actual}, expected {expected:g}"})
+
+    connection.close()
+    summary = metrics_store.summary()
+    passed = sum(1 for r in results if r["pass"])
+    pct = passed / len(results) * 100
+    values = [r for r in results if r["kind"] == "value"]
+    refusals = [r for r in results if r["kind"] == "refusal"]
+
+    if args.md:
+        print("## Evaluation\n")
+        print(f"Provider: `{args.provider}` · dataset: `{args.data}`\n")
+        print("| Metric | Result |\n|---|---|")
+        print(f"| Accuracy | **{pct:.1f}%** ({passed}/{len(results)}) |")
+        print(f"| Grounded-value questions | {sum(r['pass'] for r in values)}/{len(values)} |")
+        print(f"| Correct refusals | {sum(r['pass'] for r in refusals)}/{len(refusals)} |")
+        print(f"| Avg tokens / query | {summary['avg_tokens_total']} |")
+        print(f"| Avg latency | {summary['avg_latency_ms']} ms |")
+        print(f"| Model calls per answer | 1 |\n")
+        print("| # | Question | Result |\n|---|---|---|")
+        for i, r in enumerate(results, 1):
+            print(f"| {i} | {r['q']} | {'pass' if r['pass'] else 'FAIL'} — {r['detail']} |")
+    else:
+        print()
+        for i, r in enumerate(results, 1):
+            print(f"  {'PASS' if r['pass'] else 'FAIL'}  {i:2}. {r['q']}")
+            if not r["pass"]:
+                print(f"         {r['detail']}")
+        print(f"\n  {'-' * 56}")
+        print(f"  accuracy        {pct:.1f}%  ({passed}/{len(results)})")
+        print(f"  value questions {sum(r['pass'] for r in values)}/{len(values)}")
+        print(f"  refusals        {sum(r['pass'] for r in refusals)}/{len(refusals)}")
+        print(f"  avg tokens      {summary['avg_tokens_total']} per query")
+        print(f"  avg latency     {summary['avg_latency_ms']} ms")
+        print(f"  {'-' * 56}\n")
+
+    return 0 if passed == len(results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

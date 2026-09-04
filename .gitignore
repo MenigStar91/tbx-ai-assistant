@@ -16,3 +16,7 @@ data/uploads/*
 !data/uploads/.gitkeep
 *.duckdb
 
+
+# runtime artifacts
+*.db
+data/metrics.db

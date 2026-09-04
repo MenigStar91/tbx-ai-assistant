@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Golden question set for the TBX finance assistant.",
+    "",
+    "Expectations are INDEPENDENT DuckDB SQL, not hardcoded numbers, so this file",
+    "keeps working unchanged when the TBX starter dataset replaces data/sample.",
+    "If their column names differ, only the SQL here changes - the questions do not.",
+    "",
+    "expect_sql     -> the assistant's computed value must equal this query's result",
+    "expect_refusal -> the assistant MUST refuse rather than produce a figure",
+    "",
+    "Grow this during the event: every bug you fix should leave a question behind."
+  ],
+  "questions": [
+    { "q": "How much did we spend on vendor payouts last month?",
+      "expect_sql": "SELECT COALESCE(SUM(amount),0) FROM vendor_payouts WHERE payout_date >= '2026-08-01' AND payout_date <= '2026-08-31'" },
+
+    { "q": "Which transactions are unreconciled?",
+      "expect_sql": "SELECT COUNT(*) FROM transactions WHERE reconciliation_status = 'unreconciled'" },
+
+    { "q": "What is the total transaction amount?",
+      "expect_sql": "SELECT COALESCE(SUM(amount),0) FROM transactions" },
+
+    { "q": "How many vendor payouts are there?",
+      "expect_sql": "SELECT COUNT(*) FROM vendor_payouts" },
+
+    { "q": "Break down spend by vendor",
+      "expect_groups_sql": "SELECT COUNT(DISTINCT vendor_name) FROM transactions" },
+
+    { "q": "What is the average transaction amount?",
+      "expect_sql": "SELECT COALESCE(AVG(amount),0) FROM transactions" },
+
+    { "q": "What is our EBITDA?", "expect_refusal": true,
+      "why": "not derivable from the provided datasets" },
+
+    { "q": "How much did we pay Globex Corporation last month?", "expect_refusal": true,
+      "why": "vendor absent from the data - must not silently return an unfiltered total" },
+
+    { "q": "What will our spend be next quarter?", "expect_refusal": true,
+      "why": "forecasting, not retrieval" },
+
+    { "q": "How many employees do we have?", "expect_refusal": true,
+      "why": "no headcount data" },
+
+    { "q": "How many support tickets were raised?", "expect_refusal": true,
+      "why": "no ticketing data - note that \"payroll\" would NOT belong here, it is a real category in this dataset" },
+
+    { "q": "What exchange rate did we use?", "expect_refusal": true,
+      "why": "no FX data" },
+
+    { "q": "Which vendor gave the best discount?", "expect_refusal": true,
+      "why": "no discount column exists" },
+
+    { "q": "How much tax did we deduct at source?", "expect_refusal": true,
+      "why": "no TDS column in the dataset" }
+  ]
+}

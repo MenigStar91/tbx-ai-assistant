@@ -12,6 +12,7 @@ from app.schemas import Evidence, QueryPlan
 class QueryResult:
     evidence: Evidence
     csv_content: str
+    total_matching: int
 
 
 class GroundedQueryEngine:
@@ -59,16 +60,29 @@ class GroundedQueryEngine:
             else:
                 clauses.append(f'"{item.column}" {self.FILTERS[item.operator]} ?')
                 parameters.append(item.value)
-        sql = f'SELECT {select} FROM "{plan.dataset}"'
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f'SELECT {select} FROM "{plan.dataset}"{where}'
         if quoted_groups and plan.operation != "list":
             sql += " GROUP BY " + ", ".join(quoted_groups)
-        sql += " LIMIT ?"
-        parameters.append(plan.limit)
+
+        # A LIMIT belongs on a row listing, never on an aggregate: truncating
+        # groups silently changes the answer. Aggregates are already one row per
+        # group, so they are returned whole.
+        query_parameters = list(parameters)
+        if plan.operation == "list":
+            sql += " LIMIT ?"
+            query_parameters.append(plan.limit)
 
         connection = self.catalog.connection()
-        cursor = connection.execute(sql, parameters)
+
+        # The true number of rows the filters match, independent of any limit.
+        # Reporting len(rows) here is how "which transactions are unreconciled?"
+        # silently answers 50 when the real answer is 500.
+        total_matching = connection.execute(
+            f'SELECT COUNT(*) FROM "{plan.dataset}"{where}', parameters
+        ).fetchone()[0]
+
+        cursor = connection.execute(sql, query_parameters)
         names = [item[0] for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         connection.close()
@@ -78,13 +92,17 @@ class GroundedQueryEngine:
         writer.writeheader()
         writer.writerows(rows)
         calculation = f"{plan.operation} on {plan.dataset}; filters={len(plan.filters)}; grouped_by={plan.group_by or 'none'}"
+        total_groups = len(rows) if (quoted_groups and plan.operation != "list") else None
         evidence = Evidence(
             dataset=plan.dataset,
             columns=names,
             rows=rows,
-            total_rows=len(rows),
+            total_rows=total_matching,
+            returned_rows=len(rows),
+            total_groups=total_groups,
             calculation=calculation,
+            sql=sql,
             export_id=str(uuid4()),
         )
-        return QueryResult(evidence=evidence, csv_content=output.getvalue())
+        return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)
 
