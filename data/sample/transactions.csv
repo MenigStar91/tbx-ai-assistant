@@ -1,0 +1,14 @@
+transaction_id,transaction_date,vendor_id,vendor_name,account_code,category,amount,currency,reconciliation_status,description
+TXN-1001,2026-07-04,V001,CloudScale Systems,6100,Cloud Infrastructure,185000,INR,reconciled,Monthly compute services
+TXN-1002,2026-07-11,V002,PeopleBridge Services,6200,Payroll,92000,INR,reconciled,Payroll processing fee
+TXN-1003,2026-07-18,V003,Orbit Travel Desk,6300,Travel,48000,INR,reconciled,Team travel bookings
+TXN-1004,2026-07-25,V004,Northstar Consulting,6400,Professional Services,135000,INR,pending,Finance process review
+TXN-1005,2026-08-03,V001,CloudScale Systems,6100,Cloud Infrastructure,192000,INR,reconciled,Monthly compute services
+TXN-1006,2026-08-07,V002,PeopleBridge Services,6200,Payroll,92000,INR,reconciled,Payroll processing fee
+TXN-1007,2026-08-12,V003,Orbit Travel Desk,6300,Travel,61500,INR,pending,Customer workshop travel
+TXN-1008,2026-08-16,V004,Northstar Consulting,6400,Professional Services,138000,INR,reconciled,Finance process review
+TXN-1009,2026-08-21,V005,PaperTrail Supplies,6500,Office Supplies,16750,INR,unreconciled,Office consumables
+TXN-1010,2026-08-24,V006,SecureStack Labs,6600,Information Security,420000,INR,unreconciled,Annual security assessment
+TXN-1011,2026-08-28,V001,CloudScale Systems,6100,Cloud Infrastructure,38500,INR,pending,Compute overage
+TXN-1012,2026-09-02,V003,Orbit Travel Desk,6300,Travel,22000,INR,pending,September travel advance
+
