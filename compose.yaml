@@ -3,7 +3,7 @@ services:
     build: ./backend
     env_file: .env
     ports: ["8000:8000"]
-    volumes: ["./backend:/app", "./data/uploads:/app/data/uploads"]
+    volumes: ["./backend:/app", "./data:/app/data"]
     depends_on: [db]
   web:
     build: ./frontend
