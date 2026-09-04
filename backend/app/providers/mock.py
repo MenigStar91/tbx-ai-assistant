@@ -100,7 +100,7 @@ class MockProvider:
                 tokens_in=_estimate_tokens(system) + _estimate_tokens(user_message),
                 tokens_out=_estimate_tokens(content),
                 latency_ms=int((time.monotonic() - started) * 1000),
-                model="mock-rule-planner",
+                model="keyword-baseline",
             )
         if "GROUNDED_EXPLAINER" in system:
             marker = "Computed evidence: "

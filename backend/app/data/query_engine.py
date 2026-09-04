@@ -8,6 +8,10 @@ from app.data.catalog import DatasetCatalog
 from app.schemas import Evidence, QueryPlan
 
 
+class ReconciliationError(RuntimeError):
+    """The breakdown does not add up to the headline figure."""
+
+
 @dataclass
 class QueryResult:
     evidence: Evidence
@@ -27,6 +31,55 @@ class GroundedQueryEngine:
 
     def __init__(self, catalog: DatasetCatalog):
         self.catalog = catalog
+
+    # operations where the parts genuinely compose back into the whole.
+    # An average of averages is not the overall average, so it is excluded.
+    RECONCILABLE = {"sum": "SUM", "count": "COUNT", "minimum": "MIN", "maximum": "MAX"}
+
+    def _reconcile(self, connection, plan, where, parameters, rows, quoted_groups, returned, total_matching):
+        """Check the supporting numbers add up to the headline.
+
+        This is what makes "verifiable" a property rather than a claim: a
+        breakdown that is scoped differently from the headline produces a table
+        that quietly disagrees with the number above it, and nobody notices
+        until an auditor does.
+        """
+        op = plan.operation
+        if op == "list":
+            if returned == total_matching:
+                return True, f"All {total_matching} matching rows are shown."
+            return None, f"Showing {returned} of {total_matching} matching rows."
+
+        if op not in self.RECONCILABLE:
+            return None, f"No reconciliation check applies to {op}."
+
+        if not (quoted_groups and rows):
+            return None, "Single aggregate; no breakdown to reconcile against."
+
+        # the same aggregate without the grouping must equal the parts combined
+        agg = self.RECONCILABLE[op]
+        expression = "COUNT(*)" if op == "count" else f'{agg}("{plan.measure}")'
+        try:
+            whole = connection.execute(
+                f'SELECT {expression} FROM "{plan.dataset}"{where}', parameters
+            ).fetchone()[0]
+        except Exception as exc:  # noqa: BLE001 - a failed check must not fail the answer
+            return None, f"Reconciliation check could not run ({exc})."
+
+        values = [row.get("result") for row in rows if row.get("result") is not None]
+        if not values:
+            return None, "Breakdown contained no values to reconcile."
+
+        parts = sum(values) if op in {"sum", "count"} else (min(values) if op == "minimum" else max(values))
+        whole = float(whole or 0)
+        parts = float(parts)
+        delta = abs(parts - whole)
+        if delta < 0.01:
+            return True, f"The {len(values)} rows below sum to {parts:,.2f}, matching the headline."
+        return False, (
+            f"The breakdown totals {parts:,.2f} but the headline is {whole:,.2f} "
+            f"(off by {delta:,.2f}). The table and the number disagree."
+        )
 
     def execute(self, plan: QueryPlan) -> QueryResult:
         available = self.catalog.describe()
@@ -85,6 +138,11 @@ class GroundedQueryEngine:
         cursor = connection.execute(sql, query_parameters)
         names = [item[0] for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
+        # run the reconciliation check while the connection is still open
+        reconciles, reconcile_note = self._reconcile(
+            connection, plan, where, parameters, rows, quoted_groups, len(rows), total_matching
+        )
         connection.close()
 
         output = io.StringIO()
@@ -102,6 +160,8 @@ class GroundedQueryEngine:
             total_groups=total_groups,
             calculation=calculation,
             sql=sql,
+            reconciles=reconciles,
+            reconcile_note=reconcile_note,
             export_id=str(uuid4()),
         )
         return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)

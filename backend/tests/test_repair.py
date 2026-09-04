@@ -81,3 +81,51 @@ def test_repair_never_invents_a_filter():
         {"dataset": "transactions", "operation": "sum", "measure": "amount", "group_by": [], "filters": []},
         "What is the total transaction amount?", CATALOG)
     assert plan["filters"] == []
+
+
+def test_filter_values_are_canonicalised_to_real_names():
+    # "CloudScale Corp" filtered literally matches nothing and returns a
+    # confident empty result, which reads as an answer
+    values = ["CloudScale Systems", "Northwind Cloud"]
+    plan, repairs = repair_plan(
+        {"dataset": "transactions", "operation": "sum", "measure": "amount", "group_by": [],
+         "filters": [{"column": "vendor_name", "operator": "eq", "value": "CloudScale Corp"}]},
+        "How much did we pay CloudScale Corp?", CATALOG, values)
+    assert plan["filters"][0]["value"] == "CloudScale Systems"
+    assert any("resolved" in r for r in repairs)
+
+
+def test_an_exact_value_is_left_alone():
+    values = ["CloudScale Systems"]
+    plan, repairs = repair_plan(
+        {"dataset": "transactions", "operation": "sum", "measure": "amount", "group_by": [],
+         "filters": [{"column": "vendor_name", "operator": "eq", "value": "CloudScale Systems"}]},
+        "spend for CloudScale Systems", CATALOG, values)
+    assert plan["filters"][0]["value"] == "CloudScale Systems"
+    assert not any("resolved" in r for r in repairs)
+
+
+def test_a_negated_filter_without_a_negation_is_flipped():
+    # "how many vendor payouts failed" -> status neq failed counts the successes
+    plan, repairs = repair_plan(
+        {"dataset": "vendor_payouts", "operation": "count", "group_by": [],
+         "filters": [{"column": "status", "operator": "neq", "value": "failed"}]},
+        "How many vendor payouts failed?", CATALOG)
+    assert plan["filters"][0]["operator"] == "eq"
+    assert any("neq -> eq" in r for r in repairs)
+
+
+def test_a_real_negation_keeps_neq():
+    plan, repairs = repair_plan(
+        {"dataset": "vendor_payouts", "operation": "count", "group_by": [],
+         "filters": [{"column": "status", "operator": "neq", "value": "paid"}]},
+        "How many payouts are not paid?", CATALOG)
+    assert plan["filters"][0]["operator"] == "neq"
+
+
+def test_unreconciled_style_wording_keeps_neq():
+    plan, _ = repair_plan(
+        {"dataset": "transactions", "operation": "list", "group_by": [],
+         "filters": [{"column": "reconciliation_status", "operator": "neq", "value": "reconciled"}]},
+        "Which transactions are still outstanding?", CATALOG)
+    assert plan["filters"][0]["operator"] == "neq"

@@ -54,3 +54,33 @@ def test_aggregates_are_never_truncated_by_the_limit(tmp_path):
     # every group is returned; a limit of 2 would silently change the breakdown
     assert result.evidence.total_groups == 6
     assert len(result.evidence.rows) == 6
+
+
+def test_identifier_columns_are_read_as_text(tmp_path):
+    """DuckDB's sniffer types an all-digit id column as BIGINT, and the first
+    comparison against a string id then raises a conversion error that takes the
+    whole request down."""
+    from app.data.catalog import DatasetCatalog
+
+    (tmp_path / "vendor_payouts.csv").write_text(
+        "payout_id,account_code,amount\n1001,5000,100\n1002,5100,200\n"
+    )
+    catalog = DatasetCatalog(str(tmp_path))
+    types = {c["name"]: c["type"] for c in catalog.describe()["vendor_payouts"]}
+    assert types["payout_id"] == "VARCHAR"
+    assert types["account_code"] == "VARCHAR"
+    assert "BIGINT" in types["amount"] or "INT" in types["amount"]
+
+
+def test_a_string_filter_on_an_id_column_does_not_explode(tmp_path):
+    from app.data.catalog import DatasetCatalog
+    from app.data.query_engine import GroundedQueryEngine
+    from app.schemas import QueryFilter, QueryPlan
+
+    (tmp_path / "vendor_payouts.csv").write_text("payout_id,amount\n1001,100\n1002,200\n")
+    engine = GroundedQueryEngine(DatasetCatalog(str(tmp_path)))
+    result = engine.execute(QueryPlan(
+        dataset="vendor_payouts", operation="count",
+        filters=[QueryFilter(column="payout_id", operator="eq", value="PAY-2001")],
+    ))
+    assert result.total_matching == 0

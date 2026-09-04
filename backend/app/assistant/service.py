@@ -3,10 +3,11 @@ import re
 import time
 from datetime import date, timedelta
 
+import duckdb
 from pydantic import ValidationError
 
 from app.assistant import guards
-from app.assistant.narrate import narrate
+from app.assistant.narrate import allowed_numerals, narrate, verify_numbers
 from app.assistant.repair import repair_plan
 from app.assistant.smalltalk import conversational_reply
 from app.data.catalog import DatasetCatalog
@@ -53,7 +54,8 @@ RULES:
 - Never invent a column or a value. If the question cannot be answered from these
   tables, return {"clarification":"<what is missing>"}.
 
-TODAY=__TODAY__
+TODAY=__TODAY__   (anchored to the data, which spans __DATA_MIN__ to __DATA_MAX__)
+A period outside that span has no rows. Do not shift it to one that does.
 
 EXAMPLES:
 Q: How much did we spend on vendor payouts last month?
@@ -76,6 +78,9 @@ class AssistantService:
     """
 
     _vocabulary_cache: dict[str, set[str]] = {}
+    _bounds_cache: dict[str, tuple[str | None, str | None]] = {}
+    _values_cache: dict[str, list[str]] = {}
+    _column_bounds_cache: dict[str, dict[str, tuple[str, str]]] = {}
 
     def __init__(self, provider: LLMProvider, tools: ToolRegistry, catalog: DatasetCatalog):
         self.provider = provider
@@ -136,6 +141,53 @@ class AssistantService:
             self._vocabulary_cache[signature] = cached
         return cached
 
+    def _values(self, catalog: dict) -> list[str]:
+        """The names the data actually contains, for near-miss resolution."""
+        signature = json.dumps(catalog, sort_keys=True)
+        cached = self._values_cache.get(signature)
+        if cached is None:
+            connection = self.catalog.connection()
+            try:
+                cached = guards.build_values(catalog, connection)
+            finally:
+                connection.close()
+            self._values_cache[signature] = cached
+        return cached
+
+    def _column_bounds(self, catalog: dict) -> dict[str, tuple[str, str]]:
+        signature = json.dumps(catalog, sort_keys=True)
+        cached = self._column_bounds_cache.get(signature)
+        if cached is None:
+            cached = self.catalog.column_date_bounds()
+            self._column_bounds_cache[signature] = cached
+        return cached
+
+    def _anchor(self, catalog: dict) -> tuple[date, str | None, str | None]:
+        """The date the planner should treat as 'now'.
+
+        The day after the data ends, so "last month" resolves to the last full
+        month the data contains. Falls back to the wall clock only when nothing
+        in the data looks like a date.
+        """
+        signature = json.dumps(catalog, sort_keys=True)
+        cached = self._bounds_cache.get(signature)
+        if cached is None:
+            cached = self.catalog.date_bounds()
+            self._bounds_cache[signature] = cached
+        data_min, data_max = cached
+        if not data_max:
+            return date.today(), data_min, data_max
+        try:
+            end = date.fromisoformat(data_max[:10])
+        except ValueError:
+            return date.today(), data_min, data_max
+        # The first day of the month AFTER the data ends, so "last month" means the
+        # data's final month. Anchoring to end+1 day leaves the anchor inside that
+        # month whenever the data stops mid-month, and "last month" silently skips
+        # the most recent month the data has.
+        following = (end.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return following, data_min, data_max
+
     def _refuse(self, request: ChatRequest, message: str, language: str, reason: str, usage=None) -> ChatResponse:
         metrics_store.record(
             question=request.message,
@@ -173,7 +225,11 @@ class AssistantService:
         # ---- small talk, before the guards ------------------------------------
         # a greeting is not a question about missing data, and answering "hi" with
         # a refusal is the worst possible first impression
-        if (greeting := conversational_reply(request.message, list(catalog))) is not None:
+        if (greeting := conversational_reply(
+            request.message,
+            list(catalog),
+            {name: [c["name"] for c in cols] for name, cols in catalog.items()},
+        )) is not None:
             metrics_store.record(question=request.message, model="pre-model-smalltalk", refused=False)
             return ChatResponse(
                 session_id=request.session_id,
@@ -202,6 +258,30 @@ class AssistantService:
 
             vocabulary = self._vocabulary(catalog)
 
+            # Near-miss resolution. The word-level check above lets "Zylo Corp"
+            # through whenever some other vendor is a "Corp", so every named
+            # entity is also scored against the real values with generic company
+            # words stripped out first. A wrong vendor is a wrong number.
+            for phrase in guards.candidate_entities(request.message):
+                verdict, best, close, score = guards.resolve_entity(phrase, self._values(catalog))
+                if verdict == "unknown":
+                    return self._refuse(
+                        request,
+                        f'"{phrase}" does not appear anywhere in the loaded data, so I cannot '
+                        "answer that. Returning a figure that ignores it would be misleading.",
+                        language,
+                        f"unknown_entity:{phrase}",
+                    )
+                if verdict == "ambiguous":
+                    return self._refuse(
+                        request,
+                        f'I am not confident which one "{phrase}" refers to (closest match '
+                        f'scored {score:.2f}). Did you mean: {", ".join(close)}?',
+                        language,
+                        f"ambiguous_entity:{phrase}",
+                    )
+
+
             missing = guards.unsupported_subject(request.message, vocabulary)
             if missing:
                 available = ", ".join(sorted(catalog))
@@ -224,12 +304,14 @@ class AssistantService:
                 )
 
         # ---- one model call: question -> query plan --------------------------
-        today = date.today()
-        last_month_end = today.replace(day=1) - timedelta(days=1)
+        anchor, data_min, data_max = self._anchor(catalog)
+        last_month_end = anchor.replace(day=1) - timedelta(days=1)
         last_month_start = last_month_end.replace(day=1)
         planner_prompt = (
             PLANNER_PROMPT.replace("__CATALOG__", format_catalog(catalog))
-            .replace("__TODAY__", today.isoformat())
+            .replace("__TODAY__", anchor.isoformat())
+            .replace("__DATA_MIN__", data_min or "unknown")
+            .replace("__DATA_MAX__", data_max or "unknown")
             .replace("__LAST_MONTH_START__", last_month_start.isoformat())
             .replace("__LAST_MONTH_END__", last_month_end.isoformat())
         )
@@ -255,17 +337,42 @@ class AssistantService:
 
         # deterministic repair before validation: small planners make a small set
         # of repeatable mistakes that are cheaper to correct than to prompt away
-        raw_plan, repairs = repair_plan(raw_plan, request.message, catalog)
+        raw_plan, repairs = repair_plan(
+            raw_plan, request.message, catalog, self._values(catalog), anchor,
+            self._column_bounds(catalog),
+        )
 
         try:
             plan = QueryPlan.model_validate(raw_plan)
             result = GroundedQueryEngine(self.catalog).execute(plan)
-        except (ValidationError, ValueError) as exc:
+        except (ValidationError, ValueError, duckdb.Error) as exc:
+            # a raw pydantic traceback is not an answer; say what went wrong plainly
+            detail = str(exc).split("\n")[0]
+            if isinstance(exc, duckdb.Error):
+                # a type mismatch means the plan asked something the columns
+                # cannot answer - that is a refusal, never a stack trace
+                detail = "the filters did not match the column types in that table"
+            elif isinstance(exc, ValidationError):
+                fields = ", ".join(str(e.get("loc", ["?"])[0]) for e in exc.errors()[:3])
+                detail = f"the plan it produced was incomplete ({fields})"
             return self._refuse(
                 request,
-                f"I cannot verify that request against the available dataset: {exc}",
+                f"I could not build a query I trust for that: {detail}. "
+                "Try naming the metric, the table, or a date range explicitly.",
                 language,
                 "plan_validation_failed",
+                planned,
+            )
+
+        # a receipt that does not add up is worse than no receipt
+        if result.evidence.reconciles is False:
+            return self._refuse(
+                request,
+                "I computed a total but the supporting records do not add up to it, so I will "
+                "not show you a number I cannot stand behind. "
+                + result.evidence.reconcile_note,
+                language,
+                "reconciliation_failed",
                 planned,
             )
 
@@ -273,6 +380,11 @@ class AssistantService:
 
         # ---- narration: templated from the computed result, no model call ----
         answer = narrate(plan, result.evidence, result.total_matching, language)
+
+        # tripwire: no numeral may appear in the answer that we did not compute
+        verified, orphans = verify_numbers(
+            answer, allowed_numerals(result.evidence, result.total_matching, plan.filters)
+        )
 
         metrics_store.record(
             question=request.message,
@@ -290,6 +402,8 @@ class AssistantService:
             evidence=result.evidence,
             language=language,
             plan_repairs=repairs,
+            numbers_verified=verified,
+            orphan_numbers=orphans,
             usage={
                 "model": planned.model,
                 "tokens_in": planned.tokens_in,

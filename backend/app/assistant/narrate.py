@@ -16,6 +16,7 @@ beats a confidently wrong sentence.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.schemas import Evidence, QueryPlan
@@ -101,3 +102,37 @@ def narrate(plan: QueryPlan, evidence: Evidence, total_matching: int, language: 
         f"{total_matching} record{'s' if total_matching != 1 else ''} "
         f"in {plan.dataset}{_filter_phrase(plan)}."
     )
+
+
+# Thousands separators only count when followed by exactly three digits, so a
+# sentence comma after a figure ("...is 958,750, computed over...") is not
+# swallowed into the numeral and reported as an invented number.
+NUMERAL_RE = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
+
+
+def verify_numbers(text: str, allowed: set[str]) -> tuple[bool, list[str]]:
+    """Every numeral in the answer must be one we computed.
+
+    Trivially true while narration is a pure template -- which is the point. It
+    is a tripwire, not a fix: the day someone adds a generative rewrite step to
+    make the wording nicer, this is what catches the first invented figure
+    instead of a judge catching it.
+    """
+    orphans = [n for n in NUMERAL_RE.findall(text or "") if n not in allowed]
+    return not orphans, orphans
+
+
+def allowed_numerals(evidence, total_matching: int, filters: list) -> set[str]:
+    """Every numeral the answer is permitted to contain, from computed values."""
+    allowed: set[str] = {str(total_matching), f"{total_matching:,}"}
+    for row in (evidence.rows or []):
+        for value in row.values():
+            if isinstance(value, (int, float)):
+                allowed |= {str(value), f"{value:,}", _format_number(value)}
+            elif value is not None:
+                allowed |= set(NUMERAL_RE.findall(str(value)))
+    for item in filters or []:
+        allowed |= set(NUMERAL_RE.findall(str(getattr(item, "value", item))))
+    if evidence.total_groups is not None:
+        allowed |= {str(evidence.total_groups), f"{evidence.total_groups:,}"}
+    return allowed

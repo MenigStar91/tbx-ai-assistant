@@ -16,6 +16,7 @@ working when the TBX starter dataset replaces the sample files.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 from functools import lru_cache
 from typing import Any
 
@@ -109,14 +110,62 @@ def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckd
     return {word.lower() for word in vocabulary}
 
 
+def _edit_distance_within(a: str, b: str, limit: int) -> bool:
+    """True when a and b are at most `limit` single-character edits apart."""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def looks_like_typo(word: str, known: set[str]) -> bool:
+    """Is this a misspelling of a word we know, rather than a new subject?
+
+    "How mcuh did we spend" must not be refused as a question about a subject
+    called "mcuh". Two cheap signals cover almost every real typo:
+      * the same letters in a different order (transposition)
+      * one insertion, deletion or substitution away
+    Both require a similar length, so a genuinely different word like "ebitda"
+    still refuses.
+    """
+    if len(word) < 3:
+        return False
+    signature = "".join(sorted(word))
+    limit = 1 if len(word) <= 6 else 2
+    for candidate in known:
+        if abs(len(candidate) - len(word)) > limit:
+            continue
+        if len(candidate) == len(word) and signature == "".join(sorted(candidate)):
+            return True
+        if _edit_distance_within(word, candidate, limit):
+            return True
+    return False
+
+
 def unsupported_subject(question: str, data_vocabulary: set[str]) -> list[str]:
-    """Words in the question that are neither query language nor present in the data."""
-    known = QUERY_LEXICON | data_vocabulary
+    """Words in the question that are neither query language nor present in the data.
+
+    Generic company words are excluded: "corp" in "CloudScale Corp" names nothing,
+    it is boilerplate. Treating it as an unknown subject refuses a question whose
+    vendor resolved perfectly well.
+    """
+    known = QUERY_LEXICON | data_vocabulary | COMPANY_SUFFIXES
     words = re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", question.lower())
     unknown = [
         word
         for word in words
-        if word not in known and word.rstrip("s") not in known and f"{word}s" not in known
+        if word not in known
+        and word.rstrip("s") not in known
+        and f"{word}s" not in known
+        # a misspelling of a word we know is a typo, not a new subject
+        and not looks_like_typo(word, known)
     ]
     # de-duplicate, keep order
     seen: set[str] = set()
@@ -151,3 +200,125 @@ def unresolved_entity(question: str, data_vocabulary: set[str]) -> str | None:
 @lru_cache(maxsize=8)
 def _cached_lexicon_size() -> int:  # pragma: no cover - introspection helper
     return len(QUERY_LEXICON)
+
+
+# ---------------------------------------------------------------------------
+# Near-miss entity resolution
+# ---------------------------------------------------------------------------
+
+# Generic company words carry no identity. Left in, "Zylo Corp" scores ~0.6
+# against "Acme Corp" on the shared suffix alone, and an unknown vendor gets
+# silently treated as a known one -- which turns a correct refusal into a wrong
+# number, the most damaging failure this system can have.
+COMPANY_SUFFIXES = {
+    "corp", "corporation", "inc", "incorporated", "ltd", "limited", "llc", "llp", "co",
+    "company", "group", "holdings", "industries", "services", "solutions", "partners",
+    "pvt", "private", "technologies", "tech", "systems", "enterprises", "and", "the",
+}
+
+MATCH_FLOOR = 0.70     # below this the name simply is not in the data; a 0.6
+                       # match is noise, not a 'did you mean'
+MATCH_CONFIRM = 0.86   # above this, accept it
+
+
+def _strip_suffixes(name: str) -> str:
+    words = [w for w in re.split(r"[^a-z0-9]+", name.lower()) if w]
+    distinctive = [w for w in words if w not in COMPANY_SUFFIXES]
+    return " ".join(distinctive or words)
+
+
+def _score(query: str, candidate: str) -> float:
+    """Weighted toward the distinctive remainder, so shared boilerplate cannot
+    carry a match on its own."""
+    raw = SequenceMatcher(None, query.lower(), candidate.lower()).ratio()
+    stripped = SequenceMatcher(None, _strip_suffixes(query), _strip_suffixes(candidate)).ratio()
+    return 0.6 * stripped + 0.4 * min(raw, stripped)
+
+
+def build_values(catalog: dict[str, list[dict[str, str]]], connection) -> list[str]:
+    """Distinct values of low-cardinality text columns: the names a question can
+    plausibly be referring to."""
+    values: set[str] = set()
+    for dataset, columns in catalog.items():
+        for column in columns:
+            if "CHAR" not in column["type"].upper() and "STRING" not in column["type"].upper():
+                continue
+            try:
+                distinct = connection.execute(
+                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM "{dataset}"'
+                ).fetchone()[0]
+                if not distinct or distinct > MAX_DISTINCT:
+                    continue
+                for (value,) in connection.execute(
+                    f'SELECT DISTINCT "{column["name"]}" FROM "{dataset}" '
+                    f'WHERE "{column["name"]}" IS NOT NULL LIMIT {MAX_DISTINCT}'
+                ).fetchall():
+                    text = str(value).strip()
+                    if 2 < len(text) < 80:
+                        values.add(text)
+            except Exception:  # noqa: BLE001 - a column we cannot scan is simply skipped
+                continue
+    return sorted(values)
+
+
+# words that introduce a name: "paid Acme", "spend on Acme", "from Acme"
+ENTITY_CUE_RE = re.compile(
+    r"\b(to|from|for|with|pay|paid|pays|billed|vendor|supplier|counterparty|called|named)\s*$",
+    re.IGNORECASE,
+)
+
+
+def candidate_entities(question: str) -> list[str]:
+    """Capitalised phrases that plausibly name something in the data.
+
+    A single capitalised word at the start of a sentence is capitalised by
+    grammar, not because it names anything -- "Damn, what data do we have?"
+    must not be read as a question about a vendor called Damn. Such a word
+    counts only when something introduces it as a name.
+    """
+    found = []
+    for match in re.finditer(r"\b[A-Z][a-zA-Z&.'-]+(?:\s+[A-Z][a-zA-Z&.'-]+)*", question):
+        phrase = match.group(0)
+        words = [w for w in phrase.split() if w.lower() not in QUERY_LEXICON]
+        candidate = " ".join(words)
+        if len(candidate) < 4:
+            continue
+
+        if len(words) == 1:
+            preceding = question[: match.start()].rstrip()
+            sentence_initial = not preceding or preceding.endswith((".", "?", "!"))
+            if sentence_initial and not ENTITY_CUE_RE.search(preceding):
+                continue
+        found.append(candidate)
+    return found
+
+
+def resolve_entity(phrase: str, values: list[str]) -> tuple[str, str | None, list[str], float]:
+    """Classify a named entity against the values the data actually contains.
+
+    Returns (verdict, best_match, close_candidates, score) where verdict is one
+    of "exact", "confident", "ambiguous", "unknown".
+    """
+    if not values:
+        return "unknown", None, [], 0.0
+
+    lowered = phrase.lower().strip()
+    for value in values:
+        if value.lower() == lowered:
+            return "exact", value, [], 1.0
+
+    stripped_query = _strip_suffixes(phrase)
+    for value in values:
+        # a distinctive prefix of 3+ characters is a strong signal
+        if stripped_query and _strip_suffixes(value).startswith(stripped_query) and len(stripped_query) >= 3:
+            return "confident", value, [], 0.9
+
+    scored = sorted(((_score(phrase, value), value) for value in values), reverse=True)
+    best_score, best = scored[0]
+    close = [value for score, value in scored[:3] if score >= MATCH_FLOOR]
+
+    if best_score >= MATCH_CONFIRM:
+        return "confident", best, [], best_score
+    if best_score >= MATCH_FLOOR:
+        return "ambiguous", best, close, best_score
+    return "unknown", None, [], best_score

@@ -45,6 +45,8 @@ class Evidence(BaseModel):
     total_groups: int | None = None
     calculation: str
     sql: str | None = None
+    reconciles: bool | None = None   # None = the check does not apply to this shape
+    reconcile_note: str = ""
     export_id: str | None = None
 
 
@@ -57,6 +59,8 @@ class ChatResponse(BaseModel):
     clarification_needed: bool = False
     refusal_reason: str | None = None
     plan_repairs: list[str] = Field(default_factory=list)
+    numbers_verified: bool = True
+    orphan_numbers: list[str] = Field(default_factory=list)
     language: str = "en"
     usage: dict[str, Any] | None = None
     tool_executions: list[ToolExecution] = Field(default_factory=list)

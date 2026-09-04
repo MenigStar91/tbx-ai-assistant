@@ -25,10 +25,38 @@ _GOODBYE = re.compile(r"^(bye+|goodbye|see\s+you|later|exit|quit)[\s!.?,]*$", re
 
 _CAPABILITY = re.compile(
     r"^(help|what\s+can\s+you\s+do|what\s+do\s+you\s+do|who\s+are\s+you|what\s+is\s+this|"
-    r"how\s+do(es)?\s+(this|you)\s+work|what\s+data\s+(do\s+you\s+have|is\s+(there|available))|"
-    r"show\s+me\s+what\s+you\s+can\s+do)[\s!.?,]*$",
+    r"how\s+do(es)?\s+(this|you)\s+work|show\s+me\s+what\s+you\s+can\s+do|"
+    r"what\s+(can|should)\s+i\s+ask)[\s!.?,]*$",
     re.IGNORECASE,
 )
+
+# "what data do we have?" is a question about the dataset, not a query over it.
+# Answering it with a grand total of every transaction is a non sequitur.
+_DESCRIBE_DATA = re.compile(
+    r"^(what|which)\s+(all\s+)?(data|tables?|datasets?|columns?|fields?|files?)\s+"
+    r"(do\s+(we|you|i)\s+have|are\s+(there|available)|is\s+(there|available)|"
+    r"can\s+i\s+(query|ask\s+about)|exist)?[\s!.?,]*$",
+    re.IGNORECASE,
+)
+
+# leading filler should not stop any of the above from matching
+_FILLER = re.compile(
+    r"^(damn|wow|oh|ok|okay|hmm+|huh|well|hey|so|and|but|umm+|uh|bruh|lol|yo|alright|"
+    r"anyway|actually|btw|please)\b[\s,.!?]*",
+    re.IGNORECASE,
+)
+
+
+def _describe_reply(datasets: list[str], columns: dict[str, list[str]] | None) -> str:
+    if not datasets:
+        return "No data is loaded yet. Upload the CSV files and I will discover their columns."
+    lines = ["Here is what is loaded:", ""]
+    for name in sorted(datasets):
+        cols = (columns or {}).get(name) or []
+        shown = ", ".join(cols[:8]) + ("…" if len(cols) > 8 else "")
+        lines.append(f"  • {name}" + (f" — {shown}" if shown else ""))
+    lines += ["", "Ask about any of it and I will compute the answer from those records."]
+    return "\n".join(lines)
 
 
 def _capability_reply(datasets: list[str]) -> str:
@@ -45,7 +73,11 @@ def _capability_reply(datasets: list[str]) -> str:
     )
 
 
-def conversational_reply(question: str, datasets: list[str]) -> str | None:
+def conversational_reply(
+    question: str,
+    datasets: list[str],
+    columns: dict[str, list[str]] | None = None,
+) -> str | None:
     """A canned reply for pure small talk, or None if this is a real question.
 
     Matches only when the whole message is small talk -- "hi, how much did we
@@ -55,6 +87,15 @@ def conversational_reply(question: str, datasets: list[str]) -> str | None:
     text = (question or "").strip()
     if not text:
         return None
+    # strip leading filler so "Damn, so what data do we have?" still matches
+    stripped = _FILLER.sub("", text).strip()
+    while stripped != text:
+        text, stripped = stripped, _FILLER.sub("", stripped).strip()
+    if not text:
+        return "Hello. Ask me anything about the finance data."
+
+    if _DESCRIBE_DATA.match(text):
+        return _describe_reply(datasets, columns)
 
     if _GREETING.match(text):
         return (

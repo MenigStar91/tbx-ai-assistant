@@ -57,3 +57,30 @@ def test_indic_input_is_detected_and_skips_english_guards():
     assert guards.detect_language("पिछले महीने वेंडर पेआउट कितना था?") == "hi"
     assert guards.is_indic("hi") is True
     assert guards.detect_language("How much did we spend?") == "en"
+
+
+def test_a_typo_is_not_treated_as_an_unknown_subject(vocabulary):
+    # reported: "How mcuh did we spend on vendor payouts last month?" was refused
+    # as a question about a subject called "mcuh"
+    assert guards.unsupported_subject("How mcuh did we spend last month?", vocabulary) == []
+
+
+def test_common_typo_shapes_are_tolerated(vocabulary):
+    for question in [
+        "How mcuh did we spend?",          # transposition
+        "How much did we spned?",          # transposition
+        "Total spnd by vendor",            # deletion
+        "How muchh did we pay?",           # insertion
+        "Total spend by vendro",           # transposition
+    ]:
+        assert guards.unsupported_subject(question, vocabulary) == [], question
+
+
+def test_a_genuinely_unknown_subject_still_refuses(vocabulary):
+    assert guards.unsupported_subject("What is our EBITDA?", vocabulary) == ["ebitda"]
+    assert guards.unsupported_subject("How many employees?", vocabulary) == ["employees"]
+
+
+def test_typo_detection_needs_a_similar_length():
+    assert not guards.looks_like_typo("headcount", {"amount"})
+    assert guards.looks_like_typo("amont", {"amount"})

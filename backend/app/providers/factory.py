@@ -12,6 +12,7 @@ def create_provider(settings: Settings) -> LLMProvider:
     elif settings.llm_provider == "openai":
         primary = OpenAICompatibleProvider(settings)
     else:
+        # "keyword" is the same router, named for what it is when reported
         return MockProvider()
 
     # the mock planner is deterministic and always available, so it is the
