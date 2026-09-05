@@ -35,7 +35,10 @@ def test_final_schema_exposes_only_safe_joined_views(tmp_path):
 def test_results_and_exports_cannot_contain_protected_values(tmp_path):
     _write_final_schema(tmp_path)
     engine = GroundedQueryEngine(DatasetCatalog(str(tmp_path)))
-    result = engine.execute(QueryPlan(dataset="transaction", operation="list"))
+    result = engine.execute(QueryPlan(
+        dataset="transaction", operation="list",
+        select=["account_last4", "bank_name", "transaction_amount"],
+    ))
 
     assert result.evidence.rows[0]["account_last4"] == "2345"
     assert result.evidence.rows[0]["bank_name"] == "HDFC Bank"
