@@ -36,6 +36,7 @@ async def health() -> dict[str, str]:
 @router.get("/info")
 async def info() -> dict:
     """Machine-readable demo contract for the UI and judges."""
+    settings = get_settings()
     return {
         "purpose": "Grounded analytics over an introspected financial database",
         "model_calls_per_answer": 1,
@@ -56,6 +57,16 @@ async def info() -> dict:
             "stored_messages": 12,
             "stored_state": "compact messages and last validated query plan",
             "evidence_rows_stored": False,
+        },
+        "query_safeguards": {
+            "runtime_user": "read-only MySQL account",
+            "read_endpoint": settings.mysql_read_host,
+            "required_time_filter_tables": sorted(settings.time_filter_tables),
+            "max_evidence_or_group_rows": settings.max_result_rows,
+            "query_timeout_ms": settings.mysql_query_timeout_ms,
+            "max_estimated_query_cost": settings.mysql_max_query_cost,
+            "runtime_explain": "EXPLAIN FORMAT=JSON",
+            "explain_analyze": "controlled benchmark only" if not settings.mysql_explain_analyze else "enabled",
         },
         "evaluation": "evals/questions.json and docs/evaluation/MODEL_SCORECARD.md",
     }
