@@ -30,7 +30,10 @@ def test_row_count_is_the_true_match_count_not_the_page_size(tmp_path):
     (tmp_path / "transactions.csv").write_text(f"transaction_id,amount,reconciliation_status\n{rows}\n")
 
     engine = GroundedQueryEngine(DatasetCatalog(str(tmp_path)))
-    result = engine.execute(QueryPlan(dataset="transactions", operation="list", limit=5))
+    result = engine.execute(QueryPlan(
+        dataset="transactions", operation="list",
+        select=["transaction_id", "amount"], limit=5
+    ))
 
     assert result.evidence.returned_rows == 5
     assert result.evidence.total_rows == 12
