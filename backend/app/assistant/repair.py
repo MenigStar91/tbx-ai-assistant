@@ -23,8 +23,29 @@ from difflib import SequenceMatcher
 from datetime import date, timedelta
 
 # words that mean the user actually asked for a breakdown
-SPEND_RE = re.compile(r"\b(spend|spent|spending|paid|pay|pays|payment|payments|outflow|debit|debits|outgoing)\b", re.IGNORECASE)
-RECEIVED_RE = re.compile(r"\b(receiv\w*|credit|credits|inflow|incoming|deposit\w*)\b", re.IGNORECASE)
+SPEND_WORDS = {"spend", "spent", "spending", "paid", "pay", "pays", "payment",
+               "payments", "outflow", "outflows", "debit", "debits", "outgoing"}
+RECEIVE_WORDS = {"receive", "received", "receiving", "receipt", "receipts", "credit",
+                 "credits", "inflow", "inflows", "incoming", "deposit", "deposits"}
+
+SPEND_RE = re.compile(r"\b(" + "|".join(sorted(SPEND_WORDS)) + r")\b", re.IGNORECASE)
+RECEIVED_RE = re.compile(r"\b(" + "|".join(sorted(RECEIVE_WORDS)) + r")\b", re.IGNORECASE)
+
+
+def _mentions(question: str, words: set[str]) -> bool:
+    """Does the question ask about this direction, allowing for a typo?
+
+    Direction is the difference between money out and money in. Detecting it by
+    exact spelling meant "how much did we spned" quietly dropped the debit
+    filter and returned debits plus credits - a larger, wrong number, stated
+    with full confidence.
+    """
+    from app.assistant.guards import looks_like_typo
+
+    for token in re.findall(r"[a-zA-Z]{3,}", question.lower()):
+        if token in words or looks_like_typo(token, words):
+            return True
+    return False
 
 NEGATION_RE = re.compile(
     r"\b(not|isn'?t|aren'?t|wasn'?t|weren'?t|except|excluding|other\s+than|apart\s+from|"
@@ -316,8 +337,8 @@ def repair_plan(
     # debit/credit split column and we do not add one, so the direction is
     # expressed as a filter on the real transaction_type column.
     if real_columns and "transaction_type" in real_columns:
-        wants_spend = bool(SPEND_RE.search(question))
-        wants_received = bool(RECEIVED_RE.search(question))
+        wants_spend = _mentions(question, SPEND_WORDS)
+        wants_received = _mentions(question, RECEIVE_WORDS)
         already = any(f.get("column") == "transaction_type" for f in (plan.get("filters") or []))
         if not already and wants_spend != wants_received:
             direction = "debit" if wants_spend else "credit"
