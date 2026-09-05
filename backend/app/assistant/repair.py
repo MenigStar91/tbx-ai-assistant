@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import calendar
 import re
+from difflib import SequenceMatcher
 from datetime import date, timedelta
 
 # words that mean the user actually asked for a breakdown
@@ -189,6 +190,57 @@ def repair_plan(
         if preferred:
             repairs.append(f"set measure={preferred} (required by {plan['operation']})")
             plan["measure"] = preferred
+
+    # ---- 4a. repair column names the planner invented -----------------------
+    # observed: a sub-1B planner emits "dataset.date" instead of
+    # "transaction_date". A qualified prefix or a near-miss name is recoverable;
+    # anything else is left alone so validation refuses rather than guessing.
+    real_columns = [c["name"] for c in catalog.get(plan.get("dataset")) or []]
+    if real_columns:
+        def fix_column(name: str) -> str | None:
+            if not name or name in real_columns:
+                return None
+            bare = name.split(".")[-1]
+            if bare in real_columns:
+                return bare
+            scored = sorted(
+                ((SequenceMatcher(None, bare.lower(), c.lower()).ratio(), c) for c in real_columns),
+                reverse=True,
+            )
+            best_score, best = scored[0]
+            # a suffix match ("date" -> "transaction_date") is a strong signal
+            if best_score >= 0.62 or any(
+                c.lower().endswith("_" + bare.lower()) or c.lower().startswith(bare.lower() + "_")
+                for c in real_columns
+            ):
+                exact = next(
+                    (c for c in real_columns
+                     if c.lower().endswith("_" + bare.lower()) or c.lower().startswith(bare.lower() + "_")),
+                    None,
+                )
+                return exact or best
+            return None
+
+        for item in plan.get("filters") or []:
+            if fixed := fix_column(item.get("column", "")):
+                repairs.append(f'corrected column {item["column"]} -> {fixed}')
+                item["column"] = fixed
+        plan["group_by"] = [fix_column(g) or g for g in (plan.get("group_by") or [])]
+        if plan.get("measure") and (fixed := fix_column(plan["measure"])):
+            repairs.append(f'corrected measure {plan["measure"]} -> {fixed}')
+            plan["measure"] = fixed
+
+        # a measure that still is not a real column: fall back to the obvious
+        # numeric column rather than failing the whole query
+        if plan.get("operation") in {"sum", "average", "minimum", "maximum"} and plan.get("measure") not in real_columns:
+            numeric = [
+                c["name"] for c in catalog[plan["dataset"]]
+                if any(t in c["type"].upper() for t in ("INT", "DOUBLE", "DECIMAL", "FLOAT"))
+            ]
+            preferred = next((n for n in ("amount", "transaction_amount", "amount_paise", "value") if n in numeric), None)
+            if preferred:
+                repairs.append(f'measure {plan.get("measure")!r} is not a column here; used {preferred}')
+                plan["measure"] = preferred
 
     # ---- 4b. a negated filter needs a negation in the question ---------------
     # observed: "how many vendor payouts failed" planned status neq failed, which
