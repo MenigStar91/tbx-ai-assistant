@@ -220,6 +220,38 @@ class MySQLDatasetCatalog:
         """Avoid unbounded DISTINCT scans; filters are verified by MySQL."""
         return []
 
+    def search_values(
+        self, dataset: str, column: str, query: str, limit: int = 8
+    ) -> tuple[list[str], bool]:
+        """Search a low-cardinality/dimension field without loading it into prompts.
+
+        Prefix matching can use a normal B-tree index. The result is bounded and
+        cost-checked; high-row fact-table DISTINCT scans are rejected by the same
+        EXPLAIN policy as analytical queries.
+        """
+        described = self.describe()
+        columns = {item["name"] for item in described.get(dataset, [])}
+        if column not in columns:
+            raise QueryPolicyError("the requested suggestion field is not available")
+        searchable = re.search(r"(^|_)(name|code|status|type)$", column, re.IGNORECASE)
+        if not searchable or self.SENSITIVE_RE.search(column):
+            raise QueryPolicyError("suggestions are allowed only for safe indexed dimensions")
+        limit = max(1, min(limit, 20))
+        connection = self.connection()
+        sql = (
+            f'SELECT DISTINCT "{column}" FROM "{dataset}" '
+            f'WHERE LOWER(CAST("{column}" AS VARCHAR)) LIKE LOWER(?) '
+            f'ORDER BY "{column}" LIMIT ?'
+        )
+        parameters = [query.strip() + "%", limit + 1]
+        try:
+            connection.validate_cost(sql, parameters)
+            rows = connection.execute(sql, parameters).fetchall()
+        finally:
+            connection.close()
+        values = [str(row[0]) for row in rows if row[0] is not None]
+        return values[:limit], len(values) > limit
+
     def _extract_schema(self) -> dict[str, list[dict[str, str]]]:
         connection = self._raw_connection()
         cursor = connection.cursor()
@@ -425,6 +457,10 @@ class MySQLDatasetCatalog:
                        (t.utr_number IS NOT NULL AND TRIM(CAST(t.utr_number AS CHAR)) <> '') utr_available
                   FROM source_transaction t LEFT JOIN source_account a ON t.account_id=a.account_id
                   LEFT JOIN source_bank b ON a.bank_code=b.bank_code""")
+            if "source_vendor" in sources:
+                self._ensure_index(
+                    cursor, "source_vendor", "idx_vendor_name", ["vendor_name"]
+                )
             connection.commit()
         except Exception:
             connection.rollback()
