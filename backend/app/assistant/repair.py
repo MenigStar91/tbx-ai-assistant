@@ -174,6 +174,29 @@ def repair_plan(
         repairs.append(f"cleared measure={plan['measure']} (not used by {plan['operation']})")
         plan["measure"] = None
 
+    # A list must have an explicit, bounded projection. Small planners sometimes
+    # omit it, so select only columns named by the question plus a compact set of
+    # finance evidence columns. This never expands beyond the live catalog.
+    if plan.get("operation") == "list" and not plan.get("select"):
+        columns = [column["name"] for column in catalog.get(plan.get("dataset"), [])]
+        lowered = question.lower().replace(" ", "_")
+        mentioned = [name for name in columns if name.lower() in lowered]
+        evidence = [
+            name for name in (
+                "transaction_date", "transaction_type", "transaction_amount",
+                "transaction_reference_id", "bank_code", "bank_name",
+                "account_last4", "available_balance",
+            ) if name in columns
+        ]
+        selected = list(dict.fromkeys(mentioned + evidence))[:8]
+        if not selected:
+            selected = columns[:8]
+        plan["select"] = selected
+        repairs.append(f"set explicit list projection ({len(selected)} columns)")
+    elif plan.get("operation") != "list" and plan.get("select"):
+        plan["select"] = []
+        repairs.append("cleared list projection for aggregate query")
+
     # ---- 4. an aggregate with no measure cannot run; pick the obvious one ----
     if plan.get("operation") in {"sum", "average", "minimum", "maximum"} and not plan.get("measure"):
         columns = catalog.get(plan.get("dataset"), [])
