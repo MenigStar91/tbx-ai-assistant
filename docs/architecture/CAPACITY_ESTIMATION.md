@@ -31,7 +31,7 @@ indexes/caches suggests budgeting roughly 2–3× the compressed curated size.
 |---|---:|---|
 | Guards and context | 20 ms | Deterministic, cached vocabulary |
 | Planner model | 1,200 ms | One small-model call, ≤400 output tokens |
-| Query | 700 ms | DuckDB for demo; partitioned analytical store at scale |
+| Query | 700 ms | Indexed MySQL query; read replica/warehouse adapter at scale |
 | Reconciliation/narration | 30 ms | Deterministic code, no second model call |
 | Network/UI | 300 ms | Compact JSON and bounded evidence |
 | Total | ≤2.25 s | Target, not a measured guarantee |
@@ -51,11 +51,11 @@ and record real tokens at `/api/v1/metrics`.
 
 | Threshold/symptom | Recommended change |
 |---|---|
-| CSV scan exceeds latency target | Convert validated input to partitioned Parquet |
+| MySQL query exceeds latency target | Add indexes/read replica; route analytical scans to a warehouse if required |
 | Dataset exceeds one-node memory/scan budget | Move semantic views to warehouse/lakehouse SQL |
 | Multiple API replicas | Replace in-memory exports and local metrics with shared durable stores |
 | More than one tenant | Add tenant-scoped storage, authorization and row-level policy before query planning |
 | Repeated expensive questions | Cache by dataset version + validated plan, never raw user text alone |
 
-The React/FastAPI/model contracts do not change when DuckDB is replaced; only
-the deterministic catalog/executor adapter does.
+The React/FastAPI/model contracts do not change when MySQL is moved behind a
+read replica or replaced by a warehouse; only the catalog/executor adapter does.
