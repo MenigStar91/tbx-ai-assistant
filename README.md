@@ -167,6 +167,17 @@ pytest -q
 
 Tests cover deterministic calculations and refusal to answer without uploaded data. Add golden question-plan-answer cases once the official dataset arrives.
 
+## PR review agent
+
+The repository includes the shared `$tbx-pr-reviewer` skill under `.agents/skills/`. Use it with a GitHub pull request URL or number:
+
+```text
+Use $tbx-pr-reviewer to review PR #12.
+Use $tbx-pr-reviewer to fix the verified findings in PR #12.
+```
+
+Review mode is read-only by default. Fix mode changes only the PR branch after an explicit request, runs relevant verification, and never merges automatically.
+
 ## License
 
 Private and confidential. See [LICENSE](LICENSE). Confirm the hackathon's ownership and submission terms before replacing it with an open-source license.
