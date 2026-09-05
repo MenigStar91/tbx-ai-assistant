@@ -97,7 +97,7 @@ async def datasets() -> dict:
 async def dataset_values(
     dataset: str,
     column: str,
-    q: str = Query(default="", max_length=100),
+    q: str = Query(min_length=1, max_length=100),
     limit: int = Query(default=8, ge=1, le=20),
 ) -> dict:
     """Bounded type-ahead for clarification choices; never sent to the LLM."""
