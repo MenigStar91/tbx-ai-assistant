@@ -26,12 +26,20 @@ class Settings(BaseSettings):
     upload_directory: str = "data/uploads"
     # DATA_BACKEND=mysql reads the three tables straight from MySQL with a
     # SELECT-only grant; anything else keeps the file/DuckDB path.
-    data_backend: str = "files"
+    data_backend: Literal["files", "mysql"] = "files"
+    # Legacy/default MySQL configuration
     mysql_host: str = "127.0.0.1"
-    mysql_port: int = 3306
-    mysql_database: str = "tbx"
     mysql_user: str = ""
     mysql_password: str = ""
+    # Separate read/write connections
+    mysql_read_host: str = "127.0.0.1"
+    mysql_read_user: str = ""
+    mysql_read_password: str = ""
+    mysql_write_host: str = "127.0.0.1"
+    mysql_write_user: str = ""
+    mysql_write_password: str = ""
+    mysql_port: int = 3306
+    mysql_database: str = "tbx"
     mysql_query_timeout_ms: int = 5_000
     mysql_max_query_cost: float = 100_000.0
     mysql_explain_analyze: bool = False

@@ -7,8 +7,17 @@ from app.data.factory import create_dataset_catalog
 def main() -> None:
     settings = get_settings()
     catalog = create_dataset_catalog(settings, write=True)
+
     imported = catalog.import_directory(settings.resolved_seed_directory)
-    catalog.provision_read_user(settings.mysql_read_user, settings.mysql_read_password)
+
+    # Local setup uses separate root/write and read-only users.
+    # The shared database provides an existing user, so no provisioning is needed.
+    if settings.mysql_write_user != settings.mysql_read_user:
+        catalog.provision_read_user(
+            settings.mysql_read_user,
+            settings.mysql_read_password,
+        )
+
     print(f"Imported {len(imported)} sample dataset(s) into MySQL")
 
 

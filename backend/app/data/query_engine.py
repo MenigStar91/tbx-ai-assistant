@@ -3,7 +3,6 @@ import io
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
-
 from app.data.catalog import DatasetCatalog
 from app.data.display import PREFERRED_DISPLAY_COLUMNS
 from app.data.projections import from_clause
@@ -31,7 +30,7 @@ class GroundedQueryEngine:
     }
     FILTERS = {"eq": "=", "neq": "<>", "gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
 
-    def __init__(self, catalog: DatasetCatalogProtocol):
+    def __init__(self, catalog: DatasetCatalog):
         self.catalog = catalog
         # When the database is not ours - TBX grants SELECT only - the safe
         # surface cannot be a view there, so it is inlined into every query.
