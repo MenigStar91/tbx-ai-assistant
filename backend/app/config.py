@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "TBX AI Assistant"
     environment: str = "development"
-    llm_provider: Literal["mock", "keyword", "sarvam", "openai"] = "sarvam"
+    llm_provider: Literal["mock", "keyword", "sarvam", "openai"] = "mock"
     # when the configured provider fails, degrade to the mock planner instead of
     # returning a 502 mid-demo
     llm_fallback_to_mock: bool = True
@@ -21,7 +21,14 @@ class Settings(BaseSettings):
     openai_model: str = "qwen2.5:1.5b"
     request_timeout_seconds: float = 45.0
     cors_origins: str = "http://localhost:5173"
-    data_directory: str = "data/uploads"
+    seed_directory: str = "data/uploads"
+    upload_directory: str = "data/uploads"
+    mysql_host: str = "db"
+    mysql_port: int = 3306
+    mysql_database: str = "tbx_assistant"
+    mysql_user: str = "tbx"
+    mysql_password: str = "tbx"
+    data_max_date: str = ""
     max_result_rows: int = 200
     conversation_db_path: str = "data/runtime/conversations.db"
 
@@ -32,17 +39,19 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @property
-    def resolved_data_directory(self) -> str:
-        """DATA_DIRECTORY is written relative to the repo root, but uvicorn is
-        usually launched from backend/. Resolving against the project root means
-        the same .env works from either directory."""
-        candidate = Path(self.data_directory)
+    def _resolved_directory(self, value: str) -> str:
+        candidate = Path(value)
         if candidate.is_absolute():
             return str(candidate)
-        root = Path(__file__).resolve().parents[2]
-        rooted = root / candidate
-        return str(rooted if rooted.exists() else candidate)
+        return str(Path(__file__).resolve().parents[2] / candidate)
+
+    @property
+    def resolved_seed_directory(self) -> str:
+        return self._resolved_directory(self.seed_directory)
+
+    @property
+    def resolved_upload_directory(self) -> str:
+        return self._resolved_directory(self.upload_directory)
 
     @property
     def allowed_origins(self) -> list[str]:
