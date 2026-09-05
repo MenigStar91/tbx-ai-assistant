@@ -56,4 +56,9 @@ def merge_follow_up(current: QueryPlan, previous: QueryPlan | None, question: st
     if remove_columns:
         repairs.append("removed prior filter(s): " + ", ".join(sorted(remove_columns)))
 
-    return current.model_copy(update=updates), repairs
+    merged = current.model_copy(update=updates)
+    if merged.operation != "list" and merged.select:
+        merged = merged.model_copy(update={"select": []})
+    elif merged.operation == "list" and not merged.select and previous.operation == "list":
+        merged = merged.model_copy(update={"select": previous.select})
+    return merged, repairs
