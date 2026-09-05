@@ -1,0 +1,4 @@
+interface:
+  display_name: "TBX PR Reviewer"
+  short_description: "Review and safely fix TBX pull requests"
+  default_prompt: "Use $tbx-pr-reviewer to review this pull request for correctness, grounding, regressions, and missing tests."
