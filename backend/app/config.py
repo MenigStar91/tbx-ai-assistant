@@ -23,11 +23,18 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     seed_directory: str = "data/uploads"
     upload_directory: str = "data/uploads"
-    mysql_host: str = "db"
+    mysql_read_host: str = "db"
     mysql_port: int = 3306
     mysql_database: str = "tbx_assistant"
-    mysql_user: str = "tbx"
-    mysql_password: str = "tbx"
+    mysql_read_user: str = "tbx_readonly"
+    mysql_read_password: str = "tbx-readonly"
+    mysql_write_host: str = "db"
+    mysql_write_user: str = "root"
+    mysql_write_password: str = "local-root-only"
+    mysql_query_timeout_ms: int = 5_000
+    mysql_max_query_cost: float = 100_000.0
+    mysql_explain_analyze: bool = False
+    require_time_filter_tables: str = "transaction"
     data_max_date: str = ""
     max_result_rows: int = 200
     conversation_db_path: str = "data/runtime/conversations.db"
@@ -56,6 +63,10 @@ class Settings(BaseSettings):
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def time_filter_tables(self) -> set[str]:
+        return {name.strip() for name in self.require_time_filter_tables.split(",") if name.strip()}
 
 
 @lru_cache
