@@ -11,7 +11,7 @@ from app.assistant.narrate import allowed_numerals, narrate, verify_numbers
 from app.assistant.repair import repair_plan
 from app.assistant.smalltalk import conversational_reply
 from app.assistant.followups import merge_follow_up
-from app.data.catalog import DatasetCatalog
+from app.data.base import DatasetCatalogProtocol
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
 from app.data.query_engine import GroundedQueryEngine
@@ -30,7 +30,13 @@ def format_catalog(catalog: dict[str, list[dict[str, str]]]) -> str:
     """
     lines = []
     for dataset, columns in sorted(catalog.items()):
-        names = ", ".join(column["name"] for column in columns)
+        names = ", ".join(
+            column["name"] + (
+                f" ({' '.join(column['description'].split())[:100]})"
+                if column.get("description") else ""
+            )
+            for column in columns
+        )
         lines.append(f"{dataset}: {names}")
     return "\n".join(lines)
 
@@ -83,7 +89,7 @@ class AssistantService:
     _values_cache: dict[str, list[str]] = {}
     _column_bounds_cache: dict[str, dict[str, tuple[str, str]]] = {}
 
-    def __init__(self, provider: LLMProvider, tools: ToolRegistry, catalog: DatasetCatalog):
+    def __init__(self, provider: LLMProvider, tools: ToolRegistry, catalog: DatasetCatalogProtocol):
         self.provider = provider
         self.tools = tools
         self.catalog = catalog
@@ -129,16 +135,18 @@ class AssistantService:
         raise json.JSONDecodeError("unterminated JSON object in model output", cleaned, start)
 
     def _vocabulary(self, catalog: dict) -> set[str]:
-        """Words the dataset itself contains. Cached per catalog shape, since
-        rebuilding it means a DISTINCT scan of every text column."""
+        """Planning vocabulary, cached per extracted catalog shape."""
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._vocabulary_cache.get(signature)
         if cached is None:
-            connection = self.catalog.connection()
-            try:
-                cached = guards.build_vocabulary(catalog, connection)
-            finally:
-                connection.close()
+            if hasattr(self.catalog, "schema_vocabulary"):
+                cached = self.catalog.schema_vocabulary()
+            else:
+                connection = self.catalog.connection()
+                try:
+                    cached = guards.build_vocabulary(catalog, connection)
+                finally:
+                    connection.close()
             self._vocabulary_cache[signature] = cached
         return cached
 
@@ -147,11 +155,14 @@ class AssistantService:
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._values_cache.get(signature)
         if cached is None:
-            connection = self.catalog.connection()
-            try:
-                cached = guards.build_values(catalog, connection)
-            finally:
-                connection.close()
+            if hasattr(self.catalog, "entity_values"):
+                cached = self.catalog.entity_values()
+            else:
+                connection = self.catalog.connection()
+                try:
+                    cached = guards.build_values(catalog, connection)
+                finally:
+                    connection.close()
             self._values_cache[signature] = cached
         return cached
 
@@ -253,7 +264,7 @@ class AssistantService:
                 message, reason = sensitive
                 return self._refuse(request, message, language, reason)
 
-            capability = guards.missing_capability(request.message)
+            capability = guards.missing_capability(request.message, catalog)
             if capability:
                 message, reason = capability
                 return self._refuse(request, message, language, reason)
@@ -273,8 +284,9 @@ class AssistantService:
             # through whenever some other vendor is a "Corp", so every named
             # entity is also scored against the real values with generic company
             # words stripped out first. A wrong vendor is a wrong number.
-            for phrase in guards.candidate_entities(request.message):
-                verdict, best, close, score = guards.resolve_entity(phrase, self._values(catalog))
+            known_values = self._values(catalog)
+            for phrase in guards.candidate_entities(request.message) if known_values else []:
+                verdict, best, close, score = guards.resolve_entity(phrase, known_values)
                 if verdict == "unknown":
                     return self._refuse(
                         request,
@@ -304,7 +316,7 @@ class AssistantService:
                     f"unsupported_subject:{','.join(missing)}",
                 )
 
-            ghost = guards.unresolved_entity(request.message, vocabulary)
+            ghost = guards.unresolved_entity(request.message, vocabulary) if known_values else None
             if ghost:
                 return self._refuse(
                     request,
