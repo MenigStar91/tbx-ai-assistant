@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Lock
 from uuid import UUID
 
-from app.schemas import ConversationState, Message, QueryPlan
+from app.schemas import ConversationState, Message, PendingClarification, QueryPlan
 
 
 class ConversationStore:
@@ -28,9 +28,15 @@ class ConversationStore:
                     session_id TEXT PRIMARY KEY,
                     history_json TEXT NOT NULL,
                     last_plan_json TEXT,
+                    pending_clarification_json TEXT,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )"""
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(conversation_state)")}
+            if "pending_clarification_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE conversation_state ADD COLUMN pending_clarification_json TEXT"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path, timeout=5)
@@ -38,7 +44,8 @@ class ConversationStore:
     def load(self, session_id: UUID) -> ConversationState | None:
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT history_json, last_plan_json FROM conversation_state WHERE session_id = ?",
+                "SELECT history_json, last_plan_json, pending_clarification_json "
+                "FROM conversation_state WHERE session_id = ?",
                 (str(session_id),),
             ).fetchone()
         if row is None:
@@ -47,6 +54,9 @@ class ConversationStore:
             session_id=session_id,
             history=[Message.model_validate(item) for item in json.loads(row[0])],
             last_plan=QueryPlan.model_validate_json(row[1]) if row[1] else None,
+            pending_clarification=(
+                PendingClarification.model_validate_json(row[2]) if row[2] else None
+            ),
         )
 
     def append_turn(
@@ -55,6 +65,7 @@ class ConversationStore:
         question: str,
         answer: str,
         plan: QueryPlan | None,
+        pending_clarification: PendingClarification | None = None,
     ) -> ConversationState:
         current = self.load(session_id)
         history = list(current.history if current else [])
@@ -63,16 +74,22 @@ class ConversationStore:
         last_plan = plan or (current.last_plan if current else None)
         with self._lock, self._connect() as connection:
             connection.execute(
-                """INSERT INTO conversation_state(session_id, history_json, last_plan_json, updated_at)
-                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """INSERT INTO conversation_state(
+                     session_id, history_json, last_plan_json, pending_clarification_json, updated_at
+                   ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                    ON CONFLICT(session_id) DO UPDATE SET
                      history_json=excluded.history_json,
                      last_plan_json=excluded.last_plan_json,
+                     pending_clarification_json=excluded.pending_clarification_json,
                      updated_at=CURRENT_TIMESTAMP""",
                 (
                     str(session_id),
                     json.dumps([message.model_dump() for message in history]),
                     last_plan.model_dump_json() if last_plan else None,
+                    pending_clarification.model_dump_json() if pending_clarification else None,
                 ),
             )
-        return ConversationState(session_id=session_id, history=history, last_plan=last_plan)
+        return ConversationState(
+            session_id=session_id, history=history, last_plan=last_plan,
+            pending_clarification=pending_clarification,
+        )

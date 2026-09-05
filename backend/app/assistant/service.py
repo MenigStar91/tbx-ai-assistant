@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.assistant import guards
 from app.assistant.narrate import allowed_numerals, narrate, verify_numbers
 from app.assistant.repair import repair_plan
+from app.assistant.semantic import normalise, relevant_catalog, resolve_plan_fields
 from app.assistant.smalltalk import conversational_reply
 from app.assistant.followups import merge_follow_up
 from app.data.base import DatasetCatalogProtocol
@@ -16,7 +17,10 @@ from app.data.exports import export_store
 from app.data.metrics import metrics_store
 from app.data.query_engine import GroundedQueryEngine
 from app.providers.base import LLMProvider
-from app.schemas import ChatRequest, ChatResponse, Message, QueryPlan
+from app.schemas import (
+    ChatRequest, ChatResponse, ClarificationOption, ClarificationRequest, Message,
+    PendingClarification, ProviderResponse, QueryPlan,
+)
 from app.tools.registry import ToolRegistry
 
 
@@ -90,6 +94,7 @@ class AssistantService:
     _bounds_cache: dict[str, tuple[str | None, str | None]] = {}
     _values_cache: dict[str, list[str]] = {}
     _column_bounds_cache: dict[str, dict[str, tuple[str, str]]] = {}
+    _value_search_cache: dict[tuple[str, str, str], tuple[list[str], bool]] = {}
 
     def __init__(self, provider: LLMProvider, tools: ToolRegistry, catalog: DatasetCatalogProtocol):
         self.provider = provider
@@ -236,6 +241,50 @@ class AssistantService:
                 "no_dataset",
             )
 
+        # A selected clarification resumes the server-stored partial plan. The
+        # browser cannot supply or alter that plan, and no second model call is
+        # needed for an allowlisted selection.
+        resumed_plan = None
+        clarification_attempts = 0
+        if request.selection:
+            pending = request.pending_clarification
+            if not pending or pending.request.id != request.selection.clarification_id:
+                return self._refuse(
+                    request, "That clarification has expired. Please ask the question again.",
+                    language, "expired_clarification",
+                )
+            allowed = {option.value for option in pending.request.options}
+            if request.selection.value not in allowed and pending.request.allow_search:
+                slot = pending.request.slot.split(":")
+                if slot[0] == "filters" and slot[2] == "value":
+                    item = pending.partial_plan["filters"][int(slot[1])]
+                    matches, _ = self.catalog.search_values(
+                        pending.partial_plan["dataset"], item["column"],
+                        request.selection.value, 8,
+                    )
+                    exact = next(
+                        (value for value in matches if normalise(value) == normalise(request.selection.value)),
+                        None,
+                    )
+                    if exact:
+                        request.selection.value = exact
+                        allowed.add(exact)
+            if request.selection.value not in allowed:
+                return self._refuse(
+                    request, "Please choose one of the fields shown for this question.",
+                    language, "invalid_clarification_selection",
+                )
+            resumed_plan = dict(pending.partial_plan)
+            clarification_attempts = pending.attempts + 1
+            slot = pending.request.slot.split(":")
+            if slot[0] in {"measure"}:
+                resumed_plan[slot[0]] = request.selection.value
+            elif slot[0] in {"group_by", "select"}:
+                resumed_plan[slot[0]][int(slot[1])] = request.selection.value
+            elif slot[0] == "filters":
+                resumed_plan["filters"][int(slot[1])][slot[2]] = request.selection.value
+            request = request.model_copy(update={"message": pending.original_question})
+
         # ---- small talk, before the guards ------------------------------------
         # a greeting is not a question about missing data, and answering "hi" with
         # a refusal is the worst possible first impression
@@ -333,7 +382,9 @@ class AssistantService:
         last_month_end = anchor.replace(day=1) - timedelta(days=1)
         last_month_start = last_month_end.replace(day=1)
         planner_prompt = (
-            PLANNER_PROMPT.replace("__CATALOG__", format_catalog(catalog))
+            PLANNER_PROMPT.replace(
+                "__CATALOG__", format_catalog(relevant_catalog(request.message, catalog))
+            )
             .replace("__TODAY__", anchor.isoformat())
             .replace("__DATA_MIN__", data_min or "unknown")
             .replace("__DATA_MAX__", data_max or "unknown")
@@ -348,10 +399,14 @@ class AssistantService:
             ))
         planner_messages.extend(request.history[-12:])
         planner_messages.append(Message(role="user", content=request.message))
-        planned = await self.provider.generate(planner_messages)
+        planned = (
+            ProviderResponse(content=json.dumps(resumed_plan), model="clarification-selection")
+            if resumed_plan is not None
+            else await self.provider.generate(planner_messages)
+        )
 
         try:
-            raw_plan = self._json_object(planned.content)
+            raw_plan = resumed_plan or self._json_object(planned.content)
         except (json.JSONDecodeError, IndexError):
             return self._refuse(
                 request,
@@ -371,7 +426,87 @@ class AssistantService:
             raw_plan, request.message, catalog, self._values(catalog), anchor,
             self._column_bounds(catalog),
         )
+        raw_plan, mappings, ambiguity = resolve_plan_fields(raw_plan, catalog)
+        repairs.extend(mappings)
+        if ambiguity:
+            if clarification_attempts >= 2:
+                return self._refuse(
+                    request,
+                    "I still cannot resolve the requested field safely. Please name the exact field.",
+                    language, "clarification_limit_reached", planned,
+                )
+            clarification = ClarificationRequest(
+                kind="field", slot=ambiguity.slot, prompt=ambiguity.prompt,
+                options=[ClarificationOption(**option) for option in ambiguity.options],
+            )
+            pending = PendingClarification(
+                request=clarification, original_question=request.message,
+                partial_plan=raw_plan, attempts=clarification_attempts,
+            )
+            return ChatResponse(
+                session_id=request.session_id,
+                answer=ambiguity.prompt,
+                confidence="low",
+                clarification_needed=True,
+                refusal_reason="ambiguous_field",
+                language=language,
+                clarification=clarification,
+                pending_clarification=pending,
+                usage=planned.model_dump(exclude={"content"}),
+            )
 
+        # Resolve low-cardinality values from MySQL, not from model memory. Only
+        # indexed dimension-like fields participate, and only exact equality
+        # filters need confirmation.
+        for index, item in enumerate(raw_plan.get("filters") or []):
+            column = item.get("column", "")
+            value = item.get("value")
+            if item.get("operator") != "eq" or not isinstance(value, str):
+                continue
+            if not re.search(r"(^|_)(name|code|status|type)$", column, re.IGNORECASE):
+                continue
+            key = (raw_plan.get("dataset", ""), column, normalise(value))
+            try:
+                candidates, has_more = self._value_search_cache.get(key) or self.catalog.search_values(
+                    raw_plan["dataset"], column, value, 8
+                )
+                self._value_search_cache[key] = (candidates, has_more)
+            except (AttributeError, ValueError):
+                continue
+            exact = next((candidate for candidate in candidates if normalise(candidate) == normalise(value)), None)
+            if exact:
+                item["value"] = exact
+                continue
+            if len(candidates) == 1:
+                item["value"] = candidates[0]
+                repairs.append(f"filter:{column}: {value} -> {candidates[0]} (unique database match)")
+                continue
+            clarification = ClarificationRequest(
+                kind="value", slot=f"filters:{index}:value",
+                prompt=f'Which {column.replace("_", " ")} did you mean by "{value}"?',
+                options=[ClarificationOption(label=candidate, value=candidate) for candidate in candidates],
+                allow_search=True,
+                search_url=(
+                    f"/api/v1/datasets/{raw_plan['dataset']}/values?column={column}&q="
+                ),
+            )
+            if clarification_attempts >= 2:
+                return self._refuse(
+                    request,
+                    f'I still cannot identify "{value}" safely. Please provide its exact database value.',
+                    language, "clarification_limit_reached", planned,
+                )
+            pending = PendingClarification(
+                request=clarification, original_question=request.message,
+                partial_plan=raw_plan, attempts=clarification_attempts,
+            )
+            return ChatResponse(
+                session_id=request.session_id, answer=clarification.prompt,
+                confidence="low", clarification_needed=True,
+                refusal_reason="ambiguous_value", language=language,
+                clarification=clarification, pending_clarification=pending,
+                usage=planned.model_dump(exclude={"content"}),
+            )
         try:
             plan = QueryPlan.model_validate(raw_plan)
             plan, follow_up_repairs = merge_follow_up(plan, request.previous_plan, request.message)
