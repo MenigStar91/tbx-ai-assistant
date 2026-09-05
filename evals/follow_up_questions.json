@@ -1,0 +1,20 @@
+{
+  "_comment": "Multi-turn plan accuracy. Expected plans are checked after deterministic follow-up merging.",
+  "conversations": [
+    {
+      "name": "replace transaction type and retain period",
+      "turns": [
+        {"q": "How much was debited last month?", "expect": {"dataset": "transaction", "operation": "sum", "measure": "transaction_amount", "filters": {"transaction_type": "debit"}}},
+        {"q": "Now do the same for credits", "expect": {"dataset": "transaction", "operation": "sum", "measure": "transaction_amount", "filters": {"transaction_type": "credit"}}},
+        {"q": "What about bank code HDFC?", "expect": {"dataset": "transaction", "operation": "sum", "measure": "transaction_amount", "filters": {"transaction_type": "credit", "bank_code": "HDFC"}}}
+      ]
+    },
+    {
+      "name": "no stale context leakage",
+      "turns": [
+        {"q": "Show transactions for bank code HDFC", "expect": {"dataset": "transaction", "operation": "list", "filters": {"bank_code": "HDFC"}}},
+        {"q": "How many transactions are there?", "expect": {"dataset": "transaction", "operation": "count", "filters": {}}}
+      ]
+    }
+  ]
+}

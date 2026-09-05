@@ -1,4 +1,4 @@
-import React, { FormEvent, useState } from "react";
+import React, { FormEvent, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -11,6 +11,22 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+  const [sessionId] = useState(() => {
+    const existing = localStorage.getItem("tbx-session-id");
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    localStorage.setItem("tbx-session-id", created);
+    return created;
+  });
+
+  useEffect(() => {
+    fetch(`${apiUrl}/api/v1/sessions/${sessionId}`)
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((data) => setMessages((data.history ?? []).filter(
+        (item: ChatMessage) => item.role === "user" || item.role === "assistant"
+      )))
+      .catch(() => undefined);
+  }, [apiUrl, sessionId]);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -40,13 +56,8 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          session_id: sessionId,
           message: text,
-          history: prior.map((item) => ({
-            role: item.role,
-            content: item.evidence
-              ? `${item.content}\nPrevious grounded context: ${JSON.stringify({ dataset: item.evidence.dataset, calculation: item.evidence.calculation, rows: item.evidence.rows.slice(0, 10) })}`
-              : item.content,
-          })),
         }),
       });
       if (!response.ok) throw new Error("Assistant unavailable");

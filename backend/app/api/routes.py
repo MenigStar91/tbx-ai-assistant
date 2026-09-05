@@ -1,17 +1,26 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from httpx import HTTPError
+from uuid import UUID
+from functools import lru_cache
 
 from app.assistant.service import AssistantService
 from app.config import get_settings
 from app.data.catalog import DatasetCatalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
+from app.data.conversations import ConversationStore
 from app.providers.factory import create_provider
 from app.schemas import ChatRequest, ChatResponse
 from app.tools.registry import ToolRegistry
 
 router = APIRouter(prefix="/api/v1")
+
+
+@lru_cache
+def get_conversation_store() -> ConversationStore:
+    settings = get_settings()
+    return ConversationStore(settings.conversation_db_path)
 
 
 def get_assistant_service() -> AssistantService:
@@ -42,6 +51,11 @@ async def info() -> dict:
             "cross_currency_totals": "currency and approved dated FX rates",
         },
         "metrics_endpoint": "/api/v1/metrics",
+        "conversation_memory": {
+            "stored_messages": 12,
+            "stored_state": "compact messages and last validated query plan",
+            "evidence_rows_stored": False,
+        },
         "evaluation": "evals/questions.json and docs/evaluation/MODEL_SCORECARD.md",
     }
 
@@ -85,8 +99,24 @@ async def export_csv(export_id: str) -> Response:
 async def chat(
     request: ChatRequest,
     service: AssistantService = Depends(get_assistant_service),
+    conversations: ConversationStore = Depends(get_conversation_store),
 ) -> ChatResponse:
     try:
-        return await service.respond(request)
+        state = conversations.load(request.session_id)
+        request = request.model_copy(update={
+            "history": state.history if state else request.history[-12:],
+            "previous_plan": state.last_plan if state else None,
+        })
+        response = await service.respond(request)
+        conversations.append_turn(
+            request.session_id, request.message, response.answer, response.query_plan
+        )
+        return response
     except HTTPError as exc:
         raise HTTPException(status_code=502, detail="AI provider unavailable") from exc
+
+
+@router.get("/sessions/{session_id}")
+async def session(session_id: UUID, conversations: ConversationStore = Depends(get_conversation_store)) -> dict:
+    state = conversations.load(session_id)
+    return {"session_id": str(session_id), "history": state.history if state else []}

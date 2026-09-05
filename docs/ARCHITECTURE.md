@@ -107,9 +107,9 @@ sequenceDiagram
 
 ### Stage A - request construction
 
-`frontend/src/main.tsx` sends the new message and prior conversation. For assistant messages that had evidence, it includes a compact grounded context containing the dataset, calculation summary and up to ten prior rows. This is how follow-up questions can retain context without server-side session storage.
+`frontend/src/main.tsx` creates one UUID session and reuses it across requests and page reloads. The API owns conversation integrity: SQLite stores the latest 12 compact messages and the last validated `QueryPlan`. Evidence rows are deliberately excluded from memory. On a follow-up, filters are inherited, replaced by column, or explicitly removed in deterministic code after model planning. A standalone question never inherits prior filters.
 
-Tradeoff: this is simple and stateless, but the browser becomes responsible for conversation integrity and request size grows with history. It also means evidence included in history is sent to the external model.
+Tradeoff: SQLite is durable and ideal for the single-instance demo, but horizontally scaled production deployments should replace `ConversationStore` with PostgreSQL or Redis behind the same interface. Session UUIDs are not authorization; authenticated tenant ownership is required before production use.
 
 ### Stage B - live schema discovery
 
@@ -250,7 +250,7 @@ It must not be used for model-accuracy claims.
 | DuckDB | Excellent local analytical SQL over CSV with no server setup | Repeated scans and no durable catalog; not the system of record for production |
 | Pydantic query DSL | Constrains the model and makes plans testable | Narrow expressiveness; complex finance questions need more operators |
 | One-call LLM flow | The model interprets intent; deterministic code calculates and narrates | Templates trade prose flexibility for speed and number fidelity |
-| Stateless chat history | Simple demo deployment | Client-controlled context, no durable sessions, larger requests |
+| Bounded server-side history | Durable refreshes, stable token cost, trusted prior plan | SQLite is single-instance; production needs PostgreSQL/Redis and tenant authorization |
 | Provider protocol | Model can change without rewriting orchestration | Lowest-common-denominator interface lacks streaming and structured outputs |
 
 ### Why Spring Boot is not in the current request path

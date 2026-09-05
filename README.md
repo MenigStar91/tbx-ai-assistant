@@ -8,7 +8,7 @@ Start with the [documentation map](docs/README.md). For the complete component b
 
 ## What the starter already supports
 
-- Free-form chat with multi-turn history
+- Durable, bounded multi-turn history with deterministic follow-up plan merging
 - Runtime upload and schema discovery for CSV datasets
 - Final-schema semantic views with deterministic bank/account joins
 - Account-number masking and complete UTR exclusion from chat and exports
@@ -60,7 +60,7 @@ flowchart LR
     G --> A
 ```
 
-The language model never calculates totals or writes the final figures. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, reconciles grouped evidence, and renders the answer deterministically.
+The language model never calculates totals or writes the final figures. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, reconciles grouped evidence, and renders the answer deterministically. The server retains only the latest 12 compact messages and the last validated plan. Evidence rows are never copied into conversational memory.
 
 ## Repository structure
 
@@ -181,7 +181,8 @@ Place the official files in `data/uploads/` or upload them through the UI. The s
 - The current adapter expects the final table and column names exactly; aliases belong in `DatasetCatalog`
 - UTR plaintext lookup is intentionally unsupported because the source may encrypt it
 - In-memory exports expire when the API restarts
-- Conversation history is supplied by the browser rather than persisted
+- Conversation sessions are keyed by an unguessable UUID; authentication and tenant ownership must be added before production use
+- One message produces one query plan; independent multi-question batching is not supported
 - Mock mode validates plumbing, not language understanding
 - Authentication and multi-tenancy are intentionally excluded by the problem scope
 - Model choice and accuracy metrics remain open pending TBX guidance and credits
