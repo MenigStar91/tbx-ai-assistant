@@ -42,6 +42,8 @@ QUERY_LEXICON: set[str] = set(
     now same about instead
     run ran within including excluding also then than data dataset row rows
     inr rupees rupee crore lakh lakhs usd gst gstin tds utr
+    find look lookup search locate fetch get pull retrieve trace ending starting
+    containing matching named called number numbered digits last four ref refs id ids
     receive received receives receiving receipt receipts credit credits debit debits
     inflow inflows outflow outflows deposit deposits withdrawal withdrawals balance balances
     bank banks branch entity entities program ledger ifsc reference incoming outgoing
@@ -223,9 +225,14 @@ def unsupported_subject(question: str, data_vocabulary: set[str]) -> list[str]:
     known = QUERY_LEXICON | data_vocabulary | COMPANY_SUFFIXES
     # split on hyphens and slashes: "may-june" is two ordinary words, and
     # treating it as one unknown token refuses a perfectly clear date range
+    # An identifier the user is quoting back at us - REF-SYN-0005, UTR-..., an
+    # account number - is a value to look for, not a subject we hold no data on.
+    # Stripping them here stops a perfectly good lookup being refused.
+    without_ids = re.sub(r"\b[A-Za-z]{2,}[-_]?[A-Za-z]*[-_]?\d[\w-]*\b", " ", question)
+    without_ids = re.sub(r"\b\d[\d-]*\b", " ", without_ids)
     words = [
         part
-        for token in re.findall(r"[a-zA-Z][a-zA-Z'\-/]{2,}", question.lower())
+        for token in re.findall(r"[a-zA-Z][a-zA-Z'\-/]{2,}", without_ids.lower())
         for part in re.split(r"[-/]", token)
         if len(part) >= 3
     ]
