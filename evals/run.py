@@ -123,6 +123,8 @@ async def main() -> int:
         print(f"| Correct refusals | {sum(r['pass'] for r in refusals)}/{len(refusals)} |")
         print(f"| Avg tokens / query | {summary['avg_tokens_total']} |")
         print(f"| Avg latency | {summary['avg_latency_ms']} ms |")
+        print(f"| P95 latency | {summary['p95_latency_ms']} ms |")
+        print(f"| P95 tokens / query | {summary['p95_tokens_total']} |")
         print(f"| Model calls per answer | 1 |\n")
         print("### Accuracy by capability\n")
         print("| Capability | Score | Passed |\n|---|---|---|")
@@ -151,6 +153,8 @@ async def main() -> int:
         print(f"  refusals        {sum(r['pass'] for r in refusals)}/{len(refusals)}")
         print(f"  avg tokens      {summary['avg_tokens_total']} per query")
         print(f"  avg latency     {summary['avg_latency_ms']} ms")
+        print(f"  p95 latency     {summary['p95_latency_ms']} ms")
+        print(f"  p95 tokens      {summary['p95_tokens_total']} per query")
         print(f"  {'-' * 56}\n")
 
     return 0 if passed == len(results) else 1

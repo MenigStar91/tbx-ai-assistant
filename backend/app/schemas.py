@@ -84,4 +84,8 @@ class QueryMetrics(BaseModel):
     avg_tokens_out: float
     avg_tokens_total: float
     avg_latency_ms: float
+    p50_tokens_total: float
+    p95_tokens_total: float
+    p50_latency_ms: float
+    p95_latency_ms: float
     by_model: list[dict[str, Any]]

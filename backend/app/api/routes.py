@@ -24,6 +24,28 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/info")
+async def info() -> dict:
+    """Machine-readable demo contract for the UI and judges."""
+    return {
+        "purpose": "Grounded analytics over TBX bank, account and transaction data",
+        "model_calls_per_answer": 1,
+        "calculation_engine": "DuckDB deterministic SQL",
+        "safe_datasets": ["bank", "account", "transaction"],
+        "protected_fields": {
+            "account_number": "last four only",
+            "utr_number": "not exposed or plaintext-searchable",
+        },
+        "known_missing_data": {
+            "vendor_spend": "vendor master and transaction-to-vendor mapping",
+            "double_entry_reconciliation": "immutable debit/credit journal lines",
+            "cross_currency_totals": "currency and approved dated FX rates",
+        },
+        "metrics_endpoint": "/api/v1/metrics",
+        "evaluation": "evals/questions.json and docs/evaluation/MODEL_SCORECARD.md",
+    }
+
+
 @router.get("/metrics")
 async def metrics() -> dict:
     """Measured token and latency cost per query, overall and per model.

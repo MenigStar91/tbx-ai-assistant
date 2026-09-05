@@ -192,11 +192,16 @@ DuckDB returns the rows and column names. The backend builds an `Evidence` objec
 
 The same rows are serialized into CSV and inserted into `ExportStore`.
 
-### Stage F - grounded explanation
+### Stage F - deterministic narration
 
-The provider is called a second time with only the original question and computed evidence. The explainer prompt explicitly forbids adding or recalculating numbers. This separation makes it possible to inspect whether a wrong answer came from planning, deterministic execution, or explanation.
+`narrate.py` renders a concise answer directly from the validated plan and
+computed evidence. A numeral-fidelity tripwire rejects any number that does not
+come from the result, filter or row count. This avoids a second model call,
+reduces latency and prevents an explainer from changing a correct figure.
 
-Tradeoff: two model calls improve grounding boundaries but roughly double provider overhead and add latency. A lower-cost alternative is to generate the answer deterministically from result templates and use a model only when natural-language explanation adds value.
+Tradeoff: templates are less stylistically flexible than free-form generation.
+That is deliberate for financial answers; language-specific templates can be
+added without weakening the calculation boundary.
 
 ### Stage G - rendering and export
 
@@ -229,7 +234,10 @@ Current limitations:
 
 ### Mock provider
 
-Mock mode is not an AI model. It is a deliberately narrow rule-based planner supporting the sample acceptance paths: payout routing, amount summation, vendor grouping, status filtering and `last month` date resolution. It proves that ingestion, deterministic calculation, evidence and export work without credits.
+Mock mode is not an AI model. It is a deliberately narrow rule-based planner
+supporting transaction amount, balance, bank/reference/account-last4 filters,
+grouping and `last month` resolution. It proves ingestion, calculation,
+evidence and export without credits.
 
 It must not be used for model-accuracy claims.
 
@@ -241,7 +249,7 @@ It must not be used for model-accuracy claims.
 | FastAPI | Strong Python AI/data ecosystem, async APIs, Pydantic contracts, automatic OpenAPI | Less compile-time enforcement than Java; discipline is required at boundaries |
 | DuckDB | Excellent local analytical SQL over CSV with no server setup | Repeated scans and no durable catalog; not the system of record for production |
 | Pydantic query DSL | Constrains the model and makes plans testable | Narrow expressiveness; complex finance questions need more operators |
-| Two-pass LLM flow | Calculation happens between interpretation and explanation | More latency and token usage |
+| One-call LLM flow | The model interprets intent; deterministic code calculates and narrates | Templates trade prose flexibility for speed and number fidelity |
 | Stateless chat history | Simple demo deployment | Client-controlled context, no durable sessions, larger requests |
 | Provider protocol | Model can change without rewriting orchestration | Lowest-common-denominator interface lacks streaming and structured outputs |
 
@@ -380,7 +388,7 @@ For each representative question, store:
 - Expected intent
 - Expected plan
 - Expected deterministic result
-- Required facts in the explanation
+- Required facts in the deterministic narration
 - Whether clarification is expected
 - Model tokens, latency and cost
 

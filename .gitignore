@@ -14,5 +14,5 @@ coverage/
 *.log
 data/uploads/*
 !data/uploads/.gitkeep
+data/generated/
 *.duckdb
-

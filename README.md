@@ -2,7 +2,7 @@
 
 An AI assistant for asking plain-language questions about financial operations data and receiving accurate, traceable answers. Built for the **TBX - BVP Tech Catalyst Hackathon**.
 
-For the complete component breakdown, request flow, design rationale, tradeoffs, security analysis and prioritized limitations, read [Architecture Deep Dive](docs/ARCHITECTURE.md).
+Start with the [documentation map](docs/README.md). For the complete component breakdown, request flow, design rationale, tradeoffs, security analysis and prioritized limitations, read [Architecture Deep Dive](docs/ARCHITECTURE.md).
 
 > **Dataset status:** The final TBX schema is now represented by `bank`, `account`, and `transaction`. The committed rows are synthetic; replace them with the official files without changing the assistant contract.
 
@@ -36,6 +36,16 @@ Try these immediately in mock mode:
 - `Find transaction reference ID REF-SYN-0005.`
 
 Mock mode uses a deliberately small rule-based planner for these acceptance paths. It exists for local plumbing tests, not as the final natural-language model.
+
+Generate a larger deterministic dataset without extra dependencies:
+
+```bash
+python scripts/generate_dummy_data.py --accounts 10000 --transactions 1000000
+```
+
+Then set `DATA_DIRECTORY=data/generated`. Generated data is gitignored. Capacity
+assumptions and scaling thresholds are documented in
+[Capacity Estimation](docs/architecture/CAPACITY_ESTIMATION.md).
 
 ## Grounded request flow
 
@@ -76,7 +86,9 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open the UI at http://localhost:5173, API docs at http://localhost:8000/docs, and health endpoint at http://localhost:8000/api/v1/health.
+Open the UI at http://localhost:5173, API docs at http://localhost:8000/docs,
+health endpoint at http://localhost:8000/api/v1/health, and the judge-friendly
+system contract at http://localhost:8000/api/v1/info.
 
 The default `LLM_PROVIDER=mock` requires no API key and demonstrates the grounded path with a basic count plan. For meaningful natural-language planning, configure the model selected after TBX shares its model-efficiency guidance.
 
@@ -129,6 +141,20 @@ Do not place placeholder numeric answers in the final presentation. Save the exa
 | User experience | Evidence shown inline with confidence and one-click CSV export |
 | Explainability | Dataset, calculation summary, columns and source rows returned with every answer |
 | Hallucination control | Missing data, invalid columns and ambiguous questions return clarification rather than a number |
+
+The final model scorecard measures answer accuracy, exact intent/query-plan
+generation, correct refusals, evidence fidelity, tokens and P95 latency. Current
+results are deliberately marked pending after the schema change; see
+[Model Scorecard](docs/evaluation/MODEL_SCORECARD.md) and [Evaluation Status](EVAL.md).
+
+## Data and reconciliation boundaries
+
+Complex bank/account/transaction questions use fixed semantic joins; the LLM
+never generates join SQL. Vendor questions currently identify the missing
+vendor mapping. Double-entry reconciliation requires immutable journal lines,
+which are not present in the published schema. The required atomic ingest,
+quarantine and issue workflow is specified in
+[Reconciliation and Ingestion](docs/data/RECONCILIATION.md).
 
 ## Hack-day checklist
 

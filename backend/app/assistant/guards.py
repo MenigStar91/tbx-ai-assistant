@@ -54,6 +54,30 @@ FORECAST_RE = re.compile(
 )
 
 
+def missing_capability(question: str) -> tuple[str, str] | None:
+    """Explain domain questions the published schema cannot prove.
+
+    These are not generic out-of-scope refusals: they state the minimum data
+    contract (and access) that would make the question answerable.
+    """
+    if re.search(r"\b(vendor|supplier|merchant|counterparty)s?\b", question, re.IGNORECASE):
+        return (
+            "I cannot calculate vendor spend from the current TBX schema because transactions "
+            "have no vendor identifier. I need read access to a vendor master plus a "
+            "transaction-to-vendor mapping (vendor_id, vendor_name/category, transaction_id).",
+            "missing_vendor_mapping",
+        )
+    if re.search(r"\b(recon(?:cile|ciliation)?|double[- ]entry|journal|ledger|trial balance)\b", question, re.IGNORECASE):
+        return (
+            "I cannot prove double-entry reconciliation from bank transactions alone. I need "
+            "read access to immutable journal lines containing journal_id, posting_batch_id, "
+            "account_id, debit, credit, currency, posting timestamp and posting status. "
+            "Until then I can analyze transaction totals, but not certify that books balance.",
+            "missing_ledger_entries",
+        )
+    return None
+
+
 def sensitive_request(question: str) -> tuple[str, str] | None:
     """Block requests that could expose or falsely search protected fields.
 
