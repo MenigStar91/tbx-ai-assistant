@@ -36,9 +36,10 @@ QUERY_LEXICON: set[str] = set(
     partially exception exceptions currency description narration method
     month months monthly year years annual quarter quarterly week weeks day days date dates period
     last this previous prior preceding before after between during since until earlier ago recent
-    all any some none our we us my me it that those these there the a an of in on for to from and
+    all any some none our we us my me it that those these them there the a an of in on for to from and
     or with without is are was were be been has have had do does did can could should would
     single individual entire overall across only just ever most least down up out made gave got
+    now same about instead
     run ran within including excluding also then than data dataset row rows
     inr rupees rupee crore lakh lakhs usd gst gstin tds utr
     bank banks debit debits credit credits balance balances available program entity
