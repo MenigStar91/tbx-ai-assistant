@@ -130,13 +130,15 @@ class GroundedQueryEngine:
         query_parameters = list(parameters)
         max_rows = int(getattr(self.catalog, "max_result_rows", 200))
         if plan.operation == "list":
-            sql += " LIMIT ?"
-            query_parameters.append(min(plan.limit, max_rows))
+            # MySQL can reject parameter markers in LIMIT when the same query is
+            # wrapped by EXPLAIN. Both values are validated bounded integers, so
+            # rendering this one literal is safe; all user filter values remain
+            # parameterized.
+            sql += f" LIMIT {min(plan.limit, max_rows)}"
         elif quoted_groups:
             # Fetch one sentinel group so an oversized breakdown is refused,
             # never silently truncated and presented as a reconciled whole.
-            sql += " LIMIT ?"
-            query_parameters.append(max_rows + 1)
+            sql += f" LIMIT {max_rows + 1}"
 
         connection = self.catalog.connection()
         try:
