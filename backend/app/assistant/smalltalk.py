@@ -59,15 +59,21 @@ def _describe_reply(datasets: list[str], columns: dict[str, list[str]] | None) -
     return "\n".join(lines)
 
 
-def _capability_reply(datasets: list[str]) -> str:
+def _capability_reply(datasets: list[str], columns: dict[str, list[str]] | None) -> str:
     listed = ", ".join(sorted(datasets)) if datasets else "the loaded datasets"
+    available = {column for values in (columns or {}).values() for column in values}
+    if {"transaction_amount", "transaction_type", "transaction_date"} <= available or "transaction" in datasets:
+        examples = ["How much was debited last month?"]
+    else:
+        examples = [f"How many records are in {datasets[0]}?" if datasets else "What data is available?"]
+    if "bank_code" in available or "transaction" in datasets:
+        examples.append("Show transactions for bank code HDFC")
+    if {"available_balance", "bank_name"} <= available or "account" in datasets:
+        examples.append("Break down available balance by bank")
     return (
         f"I answer questions about {listed}, and every figure is computed by SQL over "
         "those records rather than written by the model.\n\n"
-        "Try:\n"
-        "  • How much was debited last month?\n"
-        "  • Show transactions for bank code HDFC\n"
-        "  • Break down available balance by bank\n\n"
+        "Try:\n  • " + "\n  • ".join(examples) + "\n\n"
         "Open the evidence under any answer to see the rows it came from. If the data "
         "cannot answer something, I will say so rather than estimate."
     )
@@ -105,7 +111,7 @@ def conversational_reply(
             "\"Break down available balance by bank.\""
         )
     if _CAPABILITY.match(text):
-        return _capability_reply(datasets)
+        return _capability_reply(datasets, columns)
     if _THANKS.match(text):
         return "Happy to help. Ask another question whenever you need one."
     if _GOODBYE.match(text):
