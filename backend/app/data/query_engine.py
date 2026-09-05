@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from app.data.catalog import DatasetCatalog
+from app.data.base import DatasetCatalogProtocol
 from app.schemas import Evidence, QueryPlan
 
 
@@ -29,7 +29,7 @@ class GroundedQueryEngine:
     }
     FILTERS = {"eq": "=", "neq": "<>", "gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
 
-    def __init__(self, catalog: DatasetCatalog):
+    def __init__(self, catalog: DatasetCatalogProtocol):
         self.catalog = catalog
 
     # operations where the parts genuinely compose back into the whole.
@@ -86,7 +86,9 @@ class GroundedQueryEngine:
         if plan.dataset not in available:
             raise ValueError(f"Dataset '{plan.dataset}' is not available")
         columns = {column["name"] for column in available[plan.dataset]}
-        requested = set(plan.group_by) | {item.column for item in plan.filters}
+        if hasattr(self.catalog, "validate_plan"):
+            self.catalog.validate_plan(plan)
+        requested = set(plan.group_by) | set(plan.select) | {item.column for item in plan.filters}
         if plan.measure:
             requested.add(plan.measure)
         unknown = requested - columns
@@ -94,10 +96,14 @@ class GroundedQueryEngine:
             raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
         if plan.operation not in {"list", "count"} and not plan.measure:
             raise ValueError(f"Operation '{plan.operation}' requires a measure")
+        if plan.operation == "list" and not plan.select:
+            raise ValueError("List queries require an explicit column projection")
 
         quoted_groups = [f'"{column}"' for column in plan.group_by]
         if plan.operation == "list":
-            select = "*"
+            # Explicit projection is essential for an introspected database:
+            # columns excluded by the privacy catalog must not reappear through *.
+            select = ", ".join(f'"{column}"' for column in plan.select)
         else:
             expression = self.OPERATIONS[plan.operation]
             if "{measure}" in expression:
@@ -122,28 +128,45 @@ class GroundedQueryEngine:
         # groups silently changes the answer. Aggregates are already one row per
         # group, so they are returned whole.
         query_parameters = list(parameters)
+        max_rows = int(getattr(self.catalog, "max_result_rows", 200))
         if plan.operation == "list":
             sql += " LIMIT ?"
-            query_parameters.append(plan.limit)
+            query_parameters.append(min(plan.limit, max_rows))
+        elif quoted_groups:
+            # Fetch one sentinel group so an oversized breakdown is refused,
+            # never silently truncated and presented as a reconciled whole.
+            sql += " LIMIT ?"
+            query_parameters.append(max_rows + 1)
 
         connection = self.catalog.connection()
+        try:
+            if hasattr(connection, "validate_cost"):
+                connection.validate_cost(sql, query_parameters)
 
-        # The true number of rows the filters match, independent of any limit.
-        # Reporting len(rows) here is how "which transactions are unreconciled?"
-        # silently answers 50 when the real answer is 500.
-        total_matching = connection.execute(
-            f'SELECT COUNT(*) FROM "{plan.dataset}"{where}', parameters
-        ).fetchone()[0]
+            # The true number of rows the filters match, independent of any limit.
+            # Reporting len(rows) here is how "which transactions are unreconciled?"
+            # silently answers 50 when the real answer is 500.
+            count_sql = f'SELECT COUNT(*) FROM "{plan.dataset}"{where}'
+            if hasattr(connection, "validate_cost"):
+                connection.validate_cost(count_sql, parameters)
+            total_matching = connection.execute(count_sql, parameters).fetchone()[0]
 
-        cursor = connection.execute(sql, query_parameters)
-        names = [item[0] for item in cursor.description]
-        rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+            cursor = connection.execute(sql, query_parameters)
+            names = [item[0] for item in cursor.description]
+            rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+            if quoted_groups and len(rows) > max_rows:
+                raise ValueError(
+                    f"The breakdown has more than {max_rows} groups; "
+                    "add a filter or choose a narrower grouping"
+                )
 
-        # run the reconciliation check while the connection is still open
-        reconciles, reconcile_note = self._reconcile(
-            connection, plan, where, parameters, rows, quoted_groups, len(rows), total_matching
-        )
-        connection.close()
+            # Run the reconciliation check while the connection is still open.
+            reconciles, reconcile_note = self._reconcile(
+                connection, plan, where, parameters, rows, quoted_groups,
+                len(rows), total_matching
+            )
+        finally:
+            connection.close()
 
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=names)
@@ -165,4 +188,3 @@ class GroundedQueryEngine:
             export_id=str(uuid4()),
         )
         return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)
-

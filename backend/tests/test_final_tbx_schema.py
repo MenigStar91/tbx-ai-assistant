@@ -35,7 +35,10 @@ def test_final_schema_exposes_only_safe_joined_views(tmp_path):
 def test_results_and_exports_cannot_contain_protected_values(tmp_path):
     _write_final_schema(tmp_path)
     engine = GroundedQueryEngine(DatasetCatalog(str(tmp_path)))
-    result = engine.execute(QueryPlan(dataset="transaction", operation="list"))
+    result = engine.execute(QueryPlan(
+        dataset="transaction", operation="list",
+        select=["account_last4", "bank_name", "transaction_amount"],
+    ))
 
     assert result.evidence.rows[0]["account_last4"] == "2345"
     assert result.evidence.rows[0]["bank_name"] == "HDFC Bank"
@@ -74,3 +77,13 @@ def test_missing_domain_data_names_the_required_contract():
     ledger_message, ledger_reason = missing_capability("Does double entry reconciliation match?")
     assert ledger_reason == "missing_ledger_entries"
     assert "journal_id" in ledger_message
+
+
+def test_discovered_domain_columns_are_not_rejected_as_missing():
+    vendor_catalog = {"spend": [{"name": "vendor_id", "type": "varchar"}]}
+    ledger_catalog = {"journal": [
+        {"name": "debit_amount", "type": "decimal"},
+        {"name": "credit_amount", "type": "decimal"},
+    ]}
+    assert missing_capability("Spend by vendor", vendor_catalog) is None
+    assert missing_capability("Check ledger reconciliation", ledger_catalog) is None

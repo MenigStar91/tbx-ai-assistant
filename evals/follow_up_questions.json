@@ -12,8 +12,8 @@
     {
       "name": "no stale context leakage",
       "turns": [
-        {"q": "Show transactions for bank code HDFC", "expect": {"dataset": "transaction", "operation": "list", "filters": {"bank_code": "HDFC"}}},
-        {"q": "How many transactions are there?", "expect": {"dataset": "transaction", "operation": "count", "filters": {}}}
+        {"q": "Show transactions for bank code HDFC last month", "expect": {"dataset": "transaction", "operation": "list", "filters": {"bank_code": "HDFC"}}},
+        {"q": "How many transactions were there last month?", "expect": {"dataset": "transaction", "operation": "count", "filters": {}}}
       ]
     }
   ]

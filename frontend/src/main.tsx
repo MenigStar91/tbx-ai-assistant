@@ -48,7 +48,7 @@ function App() {
       const response = await fetch(`${apiUrl}/api/v1/datasets/upload`, { method: "POST", body: form });
       if (!response.ok) throw new Error();
       const data = await response.json();
-      setMessages((current) => [...current, { role: "assistant", content: `Loaded ${data.uploaded.length} dataset file(s). Their schemas were discovered automatically.` }]);
+      setMessages((current) => [...current, { role: "assistant", content: `Imported ${data.uploaded.length} dataset file(s) into the sample MySQL database and refreshed its schema.` }]);
     } catch {
       setMessages((current) => [...current, { role: "assistant", content: "Upload failed. The starter currently accepts CSV files only." }]);
     } finally { setUploading(false); }
@@ -86,9 +86,9 @@ function App() {
       <header><span>Answers grounded in financial data.</span><h1>FIFI : Financial Findings </h1><p>Ask about balances, credits, debits, banks and transaction references. Every number is computed from uploaded records.</p></header>
       <details className="info">
         <summary>How accuracy, privacy and scale are handled</summary>
-        <div><p><strong>One model call:</strong> NLP produces a constrained plan; DuckDB performs joins and calculations.</p>
+        <div><p><strong>One model call:</strong> NLP produces a constrained plan; MySQL computes over the connected database.</p>
         <p><strong>Fail closed:</strong> missing vendor or ledger data produces a clarification describing the required dataset or permission.</p>
-        <p><strong>Protected:</strong> only account last-four and UTR availability can reach chat or exports.</p>
+        <p><strong>Protected:</strong> only approved schema columns can reach chat or exports.</p>
         <p><strong>Measured:</strong> token use and latency are available at <code>/api/v1/metrics</code>; model accuracy is scored by <code>evals/run.py</code>.</p></div></details>
       <div className="chat-actions">
         <label className="upload">
