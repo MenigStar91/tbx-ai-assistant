@@ -15,6 +15,9 @@ Start with the [documentation map](docs/README.md). For the complete component b
 - Account-number masking and complete UTR exclusion from chat and exports
 - Model-generated structured query plans constrained to real datasets and columns
 - Deterministic, parameterized filtering, grouping and aggregation in MySQL
+- Read-only runtime credentials, optional replica endpoint and per-session query timeout
+- Explicit list projections, mandatory time scope for broad transactions and bounded evidence
+- Runtime `EXPLAIN FORMAT=JSON` cost guard; opt-in `EXPLAIN ANALYZE` benchmark mode
 - Plain-language explanations generated only after computation
 - Evidence tables containing the underlying records or breakdown
 - CSV export for every computed result
@@ -32,7 +35,7 @@ Place the local sample CSVs in `data/uploads/`. The Compose seed job imports the
 Try these immediately in mock mode:
 
 - `How much was debited last month?`
-- `Show transactions for bank code HDFC.`
+- `Show transactions for bank code HDFC last month.`
 - `Break down available balance by bank.`
 - `Find transaction reference ID REF-SYN-0005.`
 
@@ -118,7 +121,21 @@ curl -X POST http://localhost:8000/api/v1/datasets/upload \
 
 The importer retains the files locally, loads them into MySQL, creates safe views and refreshes the catalog. Inspect it at `GET /api/v1/datasets`.
 
-For the real database, configure `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_DATABASE`, `MYSQL_USER` and `MYSQL_PASSWORD` for a read-only analytical user and run the API without the local `seed` service. Schema extraction reads metadata only and is cached. After an approved DDL change, call `POST /api/v1/datasets/refresh`. Queries aggregate and filter inside MySQL; rows are not copied into CSV or application memory beyond the bounded result evidence.
+For the real database, configure `MYSQL_READ_HOST`, `MYSQL_PORT`, `MYSQL_DATABASE`,
+`MYSQL_READ_USER` and `MYSQL_READ_PASSWORD`, then run the API without the local
+`seed` service. Point `MYSQL_READ_HOST` at a read replica when TBX provides one;
+otherwise it can target the primary through the same interface. Do not give the
+runtime user write privileges. `MYSQL_WRITE_*` is used only by the local seed job.
+Schema extraction reads metadata only and is cached. After an approved DDL change,
+call `POST /api/v1/datasets/refresh`.
+
+Every runtime query is checked with cost-only `EXPLAIN FORMAT=JSON`, bounded by
+`MYSQL_QUERY_TIMEOUT_MS`, and refused when its estimated cost exceeds
+`MYSQL_MAX_QUERY_COST`. Broad `transaction` queries require a date/time filter;
+exact transaction/reference lookups are exempt. List plans project only requested
+safe columns, and raw evidence or grouped output is capped by `MAX_RESULT_ROWS`.
+For a controlled performance run—not normal requests—set
+`MYSQL_EXPLAIN_ANALYZE=true`; remember that MySQL then executes the explained query.
 
 ## Sample questions for the final submission
 
@@ -126,9 +143,9 @@ These are acceptance-test prompts from the stated scope. Actual answers must be 
 
 1. How much was debited last month?
 2. Break down available balance by bank.
-3. Show transactions for HDFC Bank.
+3. Show transactions for HDFC Bank last month.
 4. Find transaction reference ID REF-SYN-0005.
-5. Show transactions for the account ending in 2345.
+5. Show transactions for the account ending in 2345 last month.
 6. Export that breakdown as CSV.
 
 Do not place placeholder numeric answers in the final presentation. Save the exact question, generated query plan, evidence and response from a reproducible run.
@@ -174,6 +191,8 @@ quarantine and issue workflow is specified in
 
 - CSV import exists only for constructing the local sample database; the real source must be MySQL-compatible
 - The generic catalog discovers new tables and columns, while cross-table business joins still require approved database views
+- Sample covering indexes match the demo paths; production indexes require TBX workload evidence and `EXPLAIN ANALYZE`
+- A columnar warehouse/replica is the production scaling path for large analytical scans, not a demo dependency
 - UTR plaintext lookup is intentionally unsupported because the source may encrypt it
 - In-memory exports expire when the API restarts
 - Conversation sessions are keyed by an unguessable UUID; authentication and tenant ownership must be added before production use
