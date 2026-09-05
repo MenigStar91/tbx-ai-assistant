@@ -112,7 +112,7 @@ class GroundedQueryEngine:
         parameters: list[Any] = []
         for item in plan.filters:
             if item.operator == "contains":
-                clauses.append(f'LOWER(CAST("{item.column}" AS VARCHAR)) LIKE LOWER(?)')
+                clauses.append(f'LOWER(CAST("{item.column}" AS CHAR)) LIKE LOWER(?)')
                 parameters.append(f"%{item.value}%")
             else:
                 clauses.append(f'"{item.column}" {self.FILTERS[item.operator]} ?')
@@ -123,7 +123,9 @@ class GroundedQueryEngine:
             sql += " GROUP BY " + ", ".join(quoted_groups)
             # the narration calls out the largest groups, so the rows must be
             # ordered - otherwise "Largest:" names whichever rows came back first
-            sql += " ORDER BY result DESC NULLS LAST"
+            # NULLS LAST is not MySQL syntax; this ordering is portable and
+            # means the same thing on both engines
+            sql += " ORDER BY (result IS NULL), result DESC"
 
         # A LIMIT belongs on a row listing, never on an aggregate: truncating
         # groups silently changes the answer. Aggregates are already one row per

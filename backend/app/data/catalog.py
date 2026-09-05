@@ -77,37 +77,37 @@ class DatasetCatalog:
         """
         connection.execute('''
             CREATE VIEW bank AS
-            SELECT CAST(bank_code AS VARCHAR) AS bank_code,
-                   CAST(bank_name AS VARCHAR) AS bank_name
+            SELECT CAST(bank_code AS CHAR) AS bank_code,
+                   CAST(bank_name AS CHAR) AS bank_name
             FROM _source_bank
         ''')
         connection.execute('''
             CREATE VIEW account AS
-            SELECT CAST(a.account_id AS VARCHAR) AS account_id,
-                   CAST(a.entity_id AS VARCHAR) AS entity_id,
-                   RIGHT(CAST(a.account_number AS VARCHAR), 4) AS account_last4,
+            SELECT CAST(a.account_id AS CHAR) AS account_id,
+                   CAST(a.entity_id AS CHAR) AS entity_id,
+                   RIGHT(CAST(a.account_number AS CHAR), 4) AS account_last4,
                    a.program_id,
                    a.available_balance,
-                   CAST(a.bank_code AS VARCHAR) AS bank_code,
-                   CAST(b.bank_name AS VARCHAR) AS bank_name
+                   CAST(a.bank_code AS CHAR) AS bank_code,
+                   CAST(b.bank_name AS CHAR) AS bank_name
             FROM _source_account a
             LEFT JOIN _source_bank b ON a.bank_code = b.bank_code
         ''')
         connection.execute('''
             CREATE VIEW "transaction" AS
-            SELECT CAST(t.transaction_id AS VARCHAR) AS transaction_id,
-                   CAST(t.account_id AS VARCHAR) AS account_id,
-                   CAST(a.entity_id AS VARCHAR) AS entity_id,
-                   CAST(a.bank_code AS VARCHAR) AS bank_code,
-                   CAST(b.bank_name AS VARCHAR) AS bank_name,
+            SELECT CAST(t.transaction_id AS CHAR) AS transaction_id,
+                   CAST(t.account_id AS CHAR) AS account_id,
+                   CAST(a.entity_id AS CHAR) AS entity_id,
+                   CAST(a.bank_code AS CHAR) AS bank_code,
+                   CAST(b.bank_name AS CHAR) AS bank_name,
                    a.program_id,
-                   RIGHT(CAST(a.account_number AS VARCHAR), 4) AS account_last4,
+                   RIGHT(CAST(a.account_number AS CHAR), 4) AS account_last4,
                    t.transaction_date,
-                   CAST(t.transaction_type AS VARCHAR) AS transaction_type,
-                   CAST(t.description AS VARCHAR) AS description,
+                   CAST(t.transaction_type AS CHAR) AS transaction_type,
+                   CAST(t.description AS CHAR) AS description,
                    t.transaction_amount,
-                   CAST(t.transaction_reference_id AS VARCHAR) AS transaction_reference_id,
-                   (t.utr_number IS NOT NULL AND LENGTH(TRIM(CAST(t.utr_number AS VARCHAR))) > 0)
+                   CAST(t.transaction_reference_id AS CHAR) AS transaction_reference_id,
+                   (t.utr_number IS NOT NULL AND LENGTH(TRIM(CAST(t.utr_number AS CHAR))) > 0)
                        AS utr_available
             FROM _source_transaction t
             LEFT JOIN _source_account a ON t.account_id = a.account_id
