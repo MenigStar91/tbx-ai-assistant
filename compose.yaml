@@ -1,23 +1,39 @@
 services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tbx_assistant}
+      MYSQL_USER: ${MYSQL_USER:-tbx}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tbx}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-local-root-only}
+    ports: ["3306:3306"]
+    volumes: ["mysql_data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-local-root-only}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  seed:
+    build: ./backend
+    env_file: .env
+    command: ["python", "-m", "app.data.seed"]
+    volumes: ["./data:/app/data"]
+    depends_on:
+      db:
+        condition: service_healthy
   api:
     build: ./backend
     env_file: .env
     ports: ["8000:8000"]
     volumes: ["./backend:/app", "./data:/app/data"]
-    depends_on: [db]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
   web:
     build: ./frontend
     environment:
       VITE_API_URL: http://localhost:8000
     ports: ["5173:5173"]
     volumes: ["./frontend:/app", "/app/node_modules"]
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: tbx_assistant
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
-    volumes: ["postgres_data:/var/lib/postgresql/data"]
 volumes:
-  postgres_data:
+  mysql_data:
