@@ -1,9 +1,42 @@
 import React, { FormEvent, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import "./clarification.css";
 
 type Evidence = { dataset: string; columns: string[]; rows: Record<string, unknown>[]; calculation: string; export_id?: string };
-type ChatMessage = { role: "user" | "assistant"; content: string; confidence?: string; evidence?: Evidence };
+type ClarificationOption = { label: string; value: string; description?: string };
+type Clarification = { id: string; prompt: string; options: ClarificationOption[]; allow_search: boolean; search_url?: string };
+type ChatMessage = { role: "user" | "assistant"; content: string; confidence?: string; evidence?: Evidence; clarification?: Clarification };
+
+function ClarificationChoices({ clarification, apiUrl, disabled, choose }: {
+  clarification: Clarification; apiUrl: string; disabled: boolean;
+  choose: (option: ClarificationOption) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [options, setOptions] = useState(clarification.options);
+  useEffect(() => {
+    if (!clarification.allow_search || !clarification.search_url) return;
+    if (!query.trim()) {
+      setOptions(clarification.options);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      fetch(`${apiUrl}${clarification.search_url}${encodeURIComponent(query)}`)
+        .then((response) => response.ok ? response.json() : Promise.reject())
+        .then((data) => setOptions((data.values ?? []).map((value: string) => ({ label: value, value }))))
+        .catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [apiUrl, clarification.allow_search, clarification.options, clarification.search_url, query]);
+  return <div className="clarification">
+    {clarification.allow_search && <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search available values…" />}
+    <div className="clarification-options">{options.map((option) =>
+      <button key={option.value} type="button" disabled={disabled} onClick={() => choose(option)}>
+        {option.label}{option.description && <small>{option.description}</small>}
+      </button>
+    )}</div>
+  </div>;
+}
 
 function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -14,7 +47,6 @@ function App() {
   const [sessionId, setSessionId] = useState(() => {
     const existing = localStorage.getItem("tbx-session-id");
     if (existing) return existing;
-
     const created = crypto.randomUUID();
     localStorage.setItem("tbx-session-id", created);
     return created;
@@ -23,16 +55,20 @@ function App() {
   useEffect(() => {
     fetch(`${apiUrl}/api/v1/sessions/${sessionId}`)
       .then((response) => response.ok ? response.json() : Promise.reject())
-      .then((data) => setMessages((data.history ?? []).filter(
-        (item: ChatMessage) => item.role === "user" || item.role === "assistant"
-      )))
+      .then((data) => {
+        const history = (data.history ?? []).filter(
+          (item: ChatMessage) => item.role === "user" || item.role === "assistant"
+        );
+        if (data.clarification && history.length) {
+          history[history.length - 1] = { ...history[history.length - 1], clarification: data.clarification };
+        }
+        setMessages(history);
+      })
       .catch(() => undefined);
   }, [apiUrl, sessionId]);
 
-
-  async function newChat() {
+  function newChat() {
     const newSessionId = crypto.randomUUID();
-
     localStorage.setItem("tbx-session-id", newSessionId);
     setSessionId(newSessionId);
     setMessages([]);
@@ -48,15 +84,13 @@ function App() {
       const response = await fetch(`${apiUrl}/api/v1/datasets/upload`, { method: "POST", body: form });
       if (!response.ok) throw new Error();
       const data = await response.json();
-      setMessages((current) => [...current, { role: "assistant", content: `Loaded ${data.uploaded.length} dataset file(s). Their schemas were discovered automatically.` }]);
+      setMessages((current) => [...current, { role: "assistant", content: `Imported ${data.uploaded.length} dataset file(s) into the sample MySQL database and refreshed its schema.` }]);
     } catch {
       setMessages((current) => [...current, { role: "assistant", content: "Upload failed. The starter currently accepts CSV files only." }]);
     } finally { setUploading(false); }
   }
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const text = input.trim();
+  async function send(text: string, selection?: { clarification_id: string; value: string }) {
     if (!text || loading) return;
     const prior = messages;
     setMessages([...prior, { role: "user", content: text }]);
@@ -69,11 +103,12 @@ function App() {
         body: JSON.stringify({
           session_id: sessionId,
           message: text,
+          selection,
         }),
       });
       if (!response.ok) throw new Error("Assistant unavailable");
       const data = await response.json();
-      setMessages((current) => [...current, { role: "assistant", content: data.answer, confidence: data.confidence, evidence: data.evidence }]);
+      setMessages((current) => [...current, { role: "assistant", content: data.answer, confidence: data.confidence, evidence: data.evidence, clarification: data.clarification }]);
     } catch {
       setMessages((current) => [...current, { role: "assistant", content: "The assistant is temporarily unavailable." }]);
     } finally {
@@ -81,40 +116,25 @@ function App() {
     }
   }
 
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    await send(input.trim());
+  }
+
   return <main>
     <section className="shell">
       <header><span>Answers grounded in financial data.</span><h1>FIFI : Financial Findings </h1><p>Ask about balances, credits, debits, banks and transaction references. Every number is computed from uploaded records.</p></header>
-      <details className="info">
-        <summary>How accuracy, privacy and scale are handled</summary>
-        <div><p><strong>One model call:</strong> NLP produces a constrained plan; DuckDB performs joins and calculations.</p>
-        <p><strong>Fail closed:</strong> missing vendor or ledger data produces a clarification describing the required dataset or permission.</p>
-        <p><strong>Protected:</strong> only account last-four and UTR availability can reach chat or exports.</p>
-        <p><strong>Measured:</strong> token use and latency are available at <code>/api/v1/metrics</code>; model accuracy is scored by <code>evals/run.py</code>.</p></div></details>
+      <details className="info"><summary>How accuracy, privacy and scale are handled</summary><div><p><strong>One model call:</strong> NLP produces a constrained plan; MySQL computes over the connected database.</p><p><strong>Fail closed:</strong> missing vendor or ledger data produces a clarification describing the required dataset or permission.</p><p><strong>Protected:</strong> only approved schema columns can reach chat or exports.</p><p><strong>Measured:</strong> token use and latency are available at <code>/api/v1/metrics</code>; model accuracy is scored by <code>evals/run.py</code>.</p></div></details>
       <div className="chat-actions">
-        <label className="upload">
-          {uploading ? "Loading datasets..." : "Upload TBX CSV files"}
-          <input
-            type="file"
-            accept=".csv"
-            multiple
-            onChange={(e) => upload(e.target.files)}
-            disabled={uploading}
-          />
-        </label>
-
-        <button
-          type="button"
-          className="new-chat"
-          onClick={newChat}
-        >
-          New chat
-        </button>
+        <label className="upload">{uploading ? "Loading datasets..." : "Upload TBX CSV files"}<input type="file" accept=".csv" multiple onChange={(e) => upload(e.target.files)} disabled={uploading}/></label>
+        <button type="button" className="new-chat" onClick={newChat}>New chat</button>
       </div>
       <div className="messages">
         {messages.length === 0 && <div className="empty">Ask a question to verify the complete local flow.</div>}
         {messages.map((m, i) => <article key={i} className={m.role}>
           <div>{m.content}</div>
           {m.confidence && <small>Confidence: {m.confidence}</small>}
+          {m.clarification && <ClarificationChoices clarification={m.clarification} apiUrl={apiUrl} disabled={loading} choose={(option) => send(option.label, { clarification_id: m.clarification!.id, value: option.value })} />}
           {m.evidence && <section className="evidence"><strong>Verifiable breakdown</strong><p>{m.evidence.calculation}</p><div className="table-wrap"><table><thead><tr>{m.evidence.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead><tbody>{m.evidence.rows.map((row, r) => <tr key={r}>{m.evidence!.columns.map((c) => <td key={c}>{String(row[c] ?? "")}</td>)}</tr>)}</tbody></table></div>{m.evidence.export_id && <a href={`${apiUrl}/api/v1/exports/${m.evidence.export_id}.csv`}>Export CSV</a>}</section>}
         </article>)}
         {loading && <article className="assistant">Thinking…</article>}

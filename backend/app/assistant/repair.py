@@ -22,6 +22,26 @@ import re
 from difflib import SequenceMatcher
 from datetime import date, timedelta
 
+SPEND_WORDS = {
+    "spend", "spent", "spending", "paid", "pay", "pays", "payment", "payments",
+    "outflow", "outflows", "debit", "debits", "outgoing", "withdrawal", "withdrawals",
+}
+RECEIVE_WORDS = {
+    "receive", "received", "receiving", "receipt", "receipts", "credit", "credits",
+    "inflow", "inflows", "incoming", "deposit", "deposits",
+}
+
+
+def _mentions(question: str, words: set[str]) -> bool:
+    """Recognise a financial direction while tolerating a small typo."""
+    from app.assistant.guards import looks_like_typo
+
+    return any(
+        token in words or looks_like_typo(token, words)
+        for token in re.findall(r"[a-zA-Z]{3,}", question.lower())
+    )
+
+
 # words that mean the user actually asked for a breakdown
 SPEND_WORDS = {"spend", "spent", "spending", "paid", "pay", "pays", "payment",
                "payments", "outflow", "outflows", "debit", "debits", "outgoing"}
@@ -178,6 +198,8 @@ def repair_plan(
     """
     repairs: list[str] = []
     plan = dict(plan)
+    wants_spend = _mentions(question, SPEND_WORDS)
+    wants_received = _mentions(question, RECEIVE_WORDS)
 
     # ---- 0. a missing operation is inferable from the question ---------------
     if not plan.get("operation"):
@@ -255,10 +277,72 @@ def repair_plan(
             repairs.append(f"switched dataset {plan.get('dataset')} -> {target} (named in the question)")
             plan["dataset"] = target
 
+    # Cash-flow questions belong to the one table that actually publishes a
+    # transaction direction. This is discovered from the live catalog, not from
+    # a fixed table name.
+    if wants_spend != wants_received:
+        directional_tables = [
+            name for name, columns in catalog.items()
+            if "transaction_type" in {column["name"] for column in columns}
+        ]
+        if len(directional_tables) == 1 and plan.get("dataset") != directional_tables[0]:
+            repairs.append(
+                f"moved dataset {plan.get('dataset')} -> {directional_tables[0]} "
+                "because the question requires transaction direction"
+            )
+            plan["dataset"] = directional_tables[0]
+
+    # If the planner picked a real but unsuitable table, move only when exactly
+    # one live table contains every physical field requested by the plan.
+    chosen_columns = {
+        column["name"] for column in catalog.get(plan.get("dataset"), [])
+    }
+    referenced = {
+        item.get("column") for item in plan.get("filters") or [] if item.get("column")
+    }
+    referenced |= set(plan.get("group_by") or [])
+    referenced |= set(plan.get("select") or [])
+    if plan.get("operation") not in {"count", "list"} and plan.get("measure"):
+        referenced.add(plan["measure"])
+    if referenced - chosen_columns:
+        fitting = [
+            name for name, columns in catalog.items()
+            if referenced <= {column["name"] for column in columns}
+        ]
+        if len(fitting) == 1 and fitting[0] != plan.get("dataset"):
+            repairs.append(
+                f"moved dataset {plan.get('dataset')} -> {fitting[0]} "
+                "because it is the only table containing the requested fields"
+            )
+            plan["dataset"] = fitting[0]
+
     # ---- 3. a measure is meaningless for count/list -------------------------
     if plan.get("operation") in {"count", "list"} and plan.get("measure"):
         repairs.append(f"cleared measure={plan['measure']} (not used by {plan['operation']})")
         plan["measure"] = None
+
+    # A list must have an explicit, bounded projection. Small planners sometimes
+    # omit it, so select only columns named by the question plus a compact set of
+    # finance evidence columns. This never expands beyond the live catalog.
+    if plan.get("operation") == "list" and not plan.get("select"):
+        columns = [column["name"] for column in catalog.get(plan.get("dataset"), [])]
+        lowered = question.lower().replace(" ", "_")
+        mentioned = [name for name in columns if name.lower() in lowered]
+        evidence = [
+            name for name in (
+                "transaction_date", "transaction_type", "transaction_amount",
+                "transaction_reference_id", "bank_code", "bank_name",
+                "account_last4", "available_balance",
+            ) if name in columns
+        ]
+        selected = list(dict.fromkeys(mentioned + evidence))[:8]
+        if not selected:
+            selected = columns[:8]
+        plan["select"] = selected
+        repairs.append(f"set explicit list projection ({len(selected)} columns)")
+    elif plan.get("operation") != "list" and plan.get("select"):
+        plan["select"] = []
+        repairs.append("cleared list projection for aggregate query")
 
     # ---- 4. an aggregate with no measure cannot run; pick the obvious one ----
     if plan.get("operation") in {"sum", "average", "minimum", "maximum"} and not plan.get("measure"):

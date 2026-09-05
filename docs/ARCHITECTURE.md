@@ -2,7 +2,7 @@
 
 ## 1. Executive summary
 
-The system is a grounded natural-language interface over the final TBX bank, account and transaction schema. React sends a question to FastAPI; one lightweight-model call returns a constrained query plan; the backend repairs and validates it, executes it in DuckDB, reconciles the evidence, and narrates the result deterministically.
+The system is a grounded natural-language interface over a connected MySQL financial database. React sends a question to FastAPI; one lightweight-model call returns a constrained query plan; the backend repairs and validates it against an introspected schema, executes it in MySQL, reconciles the evidence, and narrates the result deterministically.
 
 The central design rule is:
 
@@ -39,11 +39,11 @@ flowchart LR
     UI --> API[FastAPI API]
     API --> Model[Planner model]
     API --> Engine[Grounded query engine]
-    Engine --> CSV[TBX CSV datasets]
+    Engine --> DB[Connected MySQL database]
     API --> Export[CSV export store]
 ```
 
-Only FastAPI is externally addressed by the UI. The model cannot access files or DuckDB directly and receives only safe metadata during planning.
+Only FastAPI is externally addressed by the UI. The model cannot access MySQL directly and receives only privacy-filtered schema metadata during planning.
 
 ## 4. Container and runtime view
 
@@ -51,20 +51,21 @@ Only FastAPI is externally addressed by the UI. The model cannot access files or
 flowchart TD
     Browser[Browser :5173] --> Web[Vite React container]
     Web --> API[FastAPI container :8000]
-    API --> Data[Mounted data directory]
+    API --> Data[Connected MySQL database]
     API --> Provider[Sarvam or mock provider]
-    DB[PostgreSQL container :5432]
+    API --> Memory[SQLite session state]
 ```
 
-`compose.yaml` currently launches three services:
+`compose.yaml` launches four local-demo services:
 
 | Service | Present responsibility | Important note |
 |---|---|---|
 | `web` | Vite development server and React UI | Development server, not a production static build |
-| `api` | Public endpoints, orchestration and DuckDB execution | Reload mode is enabled for development |
-| `db` | PostgreSQL 16 | Provisioned for future persistence but currently unused |
+| `seed` | Imports `data/uploads/*.csv` into local MySQL | Local sample construction only; not used with the real database |
+| `api` | Public endpoints, orchestration, schema cache and MySQL execution | Reload mode is enabled for development |
+| `db` | MySQL sample database | Replace with read-only TBX connection settings for the real environment |
 
-The repository's `data/` directory is mounted at `/app/data`. `.env` selects `data/sample` today. On hack day, setting `DATA_DIRECTORY=data/uploads` isolates official files from synthetic ones.
+The repository's `data/uploads` directory is mounted only for local sample ingestion. In the real environment, the API connects directly using a read-only MySQL account; no production rows are exported into local files.
 
 ## 5. Source-code responsibilities
 
@@ -74,12 +75,13 @@ backend/app/main.py                FastAPI bootstrapping and CORS
 backend/app/api/routes.py          HTTP boundary and dependency construction
 backend/app/assistant/service.py   Guarded one-call planning orchestration
 backend/app/providers/             Replaceable language-model boundary
-backend/app/data/catalog.py        CSV discovery and protected semantic views
+backend/app/data/mysql_catalog.py  MySQL introspection and sample CSV ingestion
+backend/app/data/catalog.py        Legacy DuckDB fixture used only by unit tests
 backend/app/data/query_engine.py   Query validation, SQL construction and execution
 backend/app/data/exports.py        Temporary CSV export cache
 backend/app/schemas.py             API and internal contract models
 backend/app/tools/registry.py      Future deterministic tool extension point
-data/sample/                       Synthetic TBX-shaped development data
+data/uploads/                      Gitignored CSV inputs for local MySQL seeding
 ```
 
 ## 6. End-to-end chat flow
@@ -90,7 +92,7 @@ sequenceDiagram
     participant R as React
     participant A as FastAPI
     participant L as LLM provider
-    participant D as DuckDB
+    participant D as MySQL
     U->>R: Ask finance question
     R->>A: POST /api/v1/chat
     A->>D: Discover datasets and columns
@@ -113,16 +115,18 @@ Tradeoff: SQLite is durable and ideal for the single-instance demo, but horizont
 
 ### Stage B - live schema discovery
 
-`DatasetCatalog.describe()` registers source CSVs as private `_source_*` views and exposes three public views: `bank`, `account`, and `transaction`. The latter two perform fixed foreign-key joins. `account_number` becomes `account_last4`; `utr_number` becomes only `utr_available`.
+`MySQLDatasetCatalog.describe()` extracts table, column, type and optional comment metadata from `INFORMATION_SCHEMA`. It caches that contract after the first extraction; `POST /api/v1/datasets/refresh` is the deliberate refresh point after approved DDL changes. It never scans production rows while building the catalog.
+
+For the local sample only, CSV ingestion creates private `source_*` tables and public privacy-safe views. `account_number` becomes `account_last4`; `utr_number` becomes only `utr_available`. The optional TBX bank/account/transaction joins live in those database views, not in model output.
 
 Why this approach:
 
-- The final TBX relationships are implemented in one adapter rather than prompted into the model.
-- DuckDB reads CSV directly and infers common types.
-- The planner sees only datasets and columns that actually exist.
-- No database migration is required for initial files.
+- The planner sees only tables and columns that exist in the current database.
+- Optional column comments improve semantics without being required.
+- Large tables are filtered and aggregated inside MySQL rather than copied to the API.
+- New schemas are extensible through introspection; cross-table business meaning stays in reviewed views.
 
-Tradeoff: schema inference occurs repeatedly and can infer inconsistent types from imperfect files. Production ingestion should validate files once, persist a versioned catalog and reject schema drift explicitly.
+Tradeoff: metadata reveals structure, not business meaning. Ambiguous names still need column comments, aliases or an approved semantic view. The cached snapshot avoids per-question extraction but must be refreshed after DDL changes.
 
 ### Stage C - planning
 
@@ -131,7 +135,7 @@ Tradeoff: schema inference occurs repeatedly and can infer inconsistent types fr
 - The user's question
 - Up to twelve prior messages
 - Today's date for relative date phrases
-- The discovered dataset catalog
+- A deterministic relevance slice of the discovered catalog (at most three tables and twenty columns per table)
 - The exact JSON structure the model must return
 
 The returned object is parsed into `QueryPlan`:
@@ -152,6 +156,26 @@ The returned object is parsed into `QueryPlan`:
 ```
 
 The model does not return SQL. It chooses values inside a deliberately small analytical DSL.
+
+### Stage C2 - semantic resolution and clarification
+
+Reviewed aliases map business phrases such as `available funds`, `bank code`
+and bare `reference number` to exact physical fields. UTR remains a separate
+protected concept and is never substituted for the ordinary transaction
+reference. Unknown model fields are automatically repaired only for one strong,
+well-separated match; close candidates pause the plan and are shown to the user.
+
+Pending clarification state contains the original question, partial plan,
+unresolved slot and allowlisted choices. It is stored in SQLite beside the
+conversation and is never accepted from the browser. A selection resumes without
+another model call. The loop is capped at two rounds and eight visible options.
+
+Safe name/code/status/type values can be searched through
+`GET /api/v1/datasets/{dataset}/values`. The endpoint uses prefix lookup, a
+maximum of twenty results, the normal query-cost guard and the read-only MySQL
+connection. Large value lists are not copied into prompts or conversation state;
+production deployments should provide B-tree indexes on searchable dimension
+columns.
 
 ### Stage D - validation and SQL construction
 
@@ -177,11 +201,22 @@ Supported filters:
 - Greater/less than comparisons
 - Case-insensitive substring matching
 
-Supported grouping is limited to three real columns. Results are capped at 200 by the schema, though the configured `max_result_rows` setting is not yet wired into this cap.
+Supported grouping is limited to three real columns. List plans must explicitly
+name their projected columns. Both evidence listings and grouped breakdowns are
+bounded by `max_result_rows`; oversized groupings are refused rather than silently
+truncated. Broad transaction queries require a date/time comparison, except exact
+transaction/reference lookups.
+
+The API connects through `MYSQL_READ_*`, which can point directly at MySQL or at
+a TBX read replica without a code change. The local seed container alone uses
+`MYSQL_WRITE_*` and provisions the demo read-only user. Each runtime statement is
+subject to a session timeout and cost-only `EXPLAIN FORMAT=JSON`. Controlled load
+tests may enable `EXPLAIN ANALYZE`; it is off in requests because it executes the
+query before the real execution.
 
 ### Stage E - evidence generation
 
-DuckDB returns the rows and column names. The backend builds an `Evidence` object containing:
+MySQL returns the bounded rows and column names. The backend builds an `Evidence` object containing:
 
 - Dataset name
 - Returned columns
@@ -241,13 +276,13 @@ evidence and export without credits.
 
 It must not be used for model-accuracy claims.
 
-## 8. Why React + FastAPI + DuckDB
+## 8. Why React + FastAPI + MySQL
 
 | Choice | Why it fits | Tradeoff |
 |---|---|---|
 | React + TypeScript | Fast interactive chat/table UX, familiar ecosystem | Current UI is a single component and needs decomposition as it grows |
 | FastAPI | Strong Python AI/data ecosystem, async APIs, Pydantic contracts, automatic OpenAPI | Less compile-time enforcement than Java; discipline is required at boundaries |
-| DuckDB | Excellent local analytical SQL over CSV with no server setup | Repeated scans and no durable catalog; not the system of record for production |
+| MySQL + schema introspection | Queries the supplied database directly and lets one code path support evolving schemas | Analytical indexes/read replicas may be required at production volume |
 | Pydantic query DSL | Constrains the model and makes plans testable | Narrow expressiveness; complex finance questions need more operators |
 | One-call LLM flow | The model interprets intent; deterministic code calculates and narrates | Templates trade prose flexibility for speed and number fidelity |
 | Bounded server-side history | Durable refreshes, stable token cost, trusted prior plan | SQLite is single-instance; production needs PostgreSQL/Redis and tenant authorization |
@@ -262,20 +297,11 @@ This problem is AI- and analytics-first, while authentication, multi-tenancy and
 The synthetic files mirror the final TBX schema and relationships, but contain no TBX-provided records.
 
 ```text
-data/sample/    committed synthetic data
-data/uploads/   gitignored official or locally uploaded data
+data/uploads/   gitignored CSV inputs used only to seed the local MySQL demo
+MySQL           authoritative query source for both sample and real environments
 ```
 
-On hack day:
-
-1. Set `DATA_DIRECTORY=data/uploads`.
-2. Add or upload the official files.
-3. Inspect `GET /api/v1/datasets`.
-4. Confirm inferred types and the fixed bank/account foreign-key joins.
-5. Add aliases in the semantic adapter only if delivered headers differ.
-6. Run golden questions before changing prompts.
-
-Changing the directory is trivial. The joins and privacy projection remain deterministic; the model continues to target the same public contract.
+For the local demo, place CSVs in `data/uploads` and let the `seed` container import them. For the real TBX environment, disable the seed container and configure a read-only MySQL user. Inspect `GET /api/v1/datasets`, confirm the extracted contract, and run golden questions. After approved DDL changes, refresh once through `POST /api/v1/datasets/refresh`.
 
 ## 10. Grounding and security boundaries
 
@@ -291,13 +317,15 @@ Changing the directory is trivial. The joins and privacy projection remain deter
 - Raw account numbers and UTRs are absent from catalogs, evidence, vocabulary scans and exports.
 - Explicit protected-field requests are refused before a model call.
 - Aggregate breakdowns are reconciled and answer numerals are verified against evidence.
+- The application runtime has SELECT-only credentials; sample ingestion uses separate credentials.
+- Transaction scans require time scope, evidence/group rows are capped and costly plans are refused.
 
 ### What is not yet protected
 
 - Upload size, row count and decompression/resource limits
 - Authentication and access control
 - File malware scanning or CSV formula-injection neutralization on export
-- Concurrent replacement of a CSV during a query
+- Concurrent schema changes while a cached catalog is active
 - Prompt-injection content embedded inside financial fields
 - Encryption and key management for protected source fields at rest
 - Per-user dataset isolation
@@ -327,19 +355,17 @@ Evaluation should report these separately. A useful golden test fixture stores t
 
 ### P1 - important engineering improvements
 
-1. The catalog reopens CSV files per query; only metadata and vocabulary scans are cached.
+1. The schema cache is process-local and requires explicit refresh after DDL changes.
 3. Export data is held in one process and disappears on restart; multiple workers would have inconsistent stores.
 4. Upload reads the complete file into memory and can overwrite a sanitized filename.
-5. PostgreSQL and `DATABASE_URL` are unused while the API waits for the database container.
-6. `ToolRegistry` and `percentage_change` are injected but not used by `AssistantService`.
-7. `max_result_rows` is configured but not connected to `QueryPlan.limit`.
-8. Errors from malformed provider payloads, DuckDB execution and serialization are not handled uniformly.
-9. Currency aggregation has no guard against summing mixed currencies.
-10. Nulls, refunds, negative payouts and duplicate transaction IDs have no explicit semantics.
+5. `ToolRegistry` and `percentage_change` are injected but not used by `AssistantService`.
+6. Errors from malformed provider payloads, MySQL execution and serialization are not handled uniformly.
+7. Currency aggregation has no guard against summing mixed currencies.
+8. Nulls, refunds, negative amounts and duplicate transaction IDs have no explicit semantics.
 
 ### P2 - production hardening
 
-- Durable conversation/session storage
+- Shared multi-replica conversation/session storage
 - Background ingestion jobs
 - Dataset versioning and lineage
 - Metrics, tracing and structured logs
@@ -357,13 +383,17 @@ flowchart TD
     Q[Question] --> Planner[Structured planner]
     Planner --> Semantic[TBX semantic model]
     Semantic --> Validator[Policy validator]
-    Validator --> Executor[DuckDB executor]
+    Validator --> Executor[MySQL executor]
     Executor --> Lineage[Evidence and lineage]
     Lineage --> Answer[Template or lightweight explainer]
     Lineage --> Eval[Golden evaluation harness]
 ```
 
 The semantic layer now defines safe joins and protected projections. The next improvement is to version that contract and add TBX-confirmed debit/credit, balance-as-of, duplicate and reversal semantics.
+
+For larger read-heavy workloads, retain the planner and policy contracts while
+routing approved analytical views to a columnar replica or warehouse. That is a
+production scaling option, not another service required for the hackathon demo.
 
 ## 14. Testing strategy
 

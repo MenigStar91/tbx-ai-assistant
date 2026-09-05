@@ -9,7 +9,7 @@ from the engine under test.
 
     python evals/run.py                       # in-process, default provider
     python evals/run.py --provider sarvam
-    python evals/run.py --data data/sample
+    python evals/run.py --dataset-label local-mysql
     python evals/run.py --md > EVAL.md        # paste into the README
 """
 
@@ -63,13 +63,11 @@ def computed_value(response) -> float | None:
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", default=os.environ.get("LLM_PROVIDER", "mock"))
-    parser.add_argument("--data", default=os.environ.get("DATA_DIRECTORY", "data/sample"))
+    parser.add_argument("--dataset-label", default="connected-mysql")
     parser.add_argument("--md", action="store_true")
     args = parser.parse_args()
 
     os.environ["LLM_PROVIDER"] = args.provider
-    os.environ["DATA_DIRECTORY"] = args.data
-
     from app.assistant.service import AssistantService
     from app.config import get_settings
     from app.data.catalog import DatasetCatalog
@@ -140,7 +138,7 @@ async def main() -> int:
 
     if args.md:
         print("## Evaluation\n")
-        print(f"Provider: `{args.provider}` · dataset: `{args.data}`\n")
+        print(f"Provider: `{args.provider}` · dataset: `{args.dataset_label}`\n")
         print("| Metric | Result |\n|---|---|")
         print(f"| Accuracy | **{pct:.1f}%** ({passed}/{len(results)}) |")
         print(f"| Grounded-value questions | {sum(r['pass'] for r in values)}/{len(values)} |")

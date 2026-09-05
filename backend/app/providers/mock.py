@@ -28,7 +28,10 @@ def _parse_catalog(system: str) -> dict[str, list[dict[str, str]]]:
         name, columns = match.group(1), match.group(2)
         if "," not in columns and " " in columns:
             continue
-        catalog[name] = [{"name": c.strip(), "type": "VARCHAR"} for c in columns.split(",") if c.strip()]
+        catalog[name] = [
+            {"name": c.split(" (", 1)[0].strip(), "type": "VARCHAR"}
+            for c in columns.split(",") if c.strip()
+        ]
     return catalog
 
 
@@ -64,11 +67,19 @@ class MockProvider:
                 operation = "minimum"
             elif any(term in question for term in ("how many", "count", "number of")):
                 operation = "count"
-            elif any(term in question for term in ("how much", "total", "spend")) and measure_column:
+            elif (
+                any(term in question for term in ("how much", "total", "spend"))
+                or ("break" in question and "amount" in question)
+            ) and measure_column:
                 operation = "sum"
             else:
                 operation = "list"
-            group_by = ["bank_name"] if "by bank" in question and "bank_name" in column_names else []
+            if "by bank" in question and "bank_name" in column_names:
+                group_by = ["bank_name"]
+            elif "by type" in question and "transaction_type" in column_names:
+                group_by = ["transaction_type"]
+            else:
+                group_by = []
             filters = []
             if "debit" in question and "transaction_type" in column_names:
                 filters.append({"column": "transaction_type", "operator": "eq", "value": "debit"})
@@ -111,6 +122,14 @@ class MockProvider:
                 "operation": operation,
                 "measure": measure_column if operation in {"sum", "average", "minimum", "maximum"} else None,
                 "group_by": group_by,
+                "select": (
+                    [name for name in (
+                        "transaction_date", "transaction_type", "transaction_amount",
+                        "transaction_reference_id", "bank_code", "bank_name",
+                        "account_last4", "available_balance",
+                    ) if name in column_names][:8]
+                    if operation == "list" else []
+                ),
                 "filters": filters,
                 "limit": 50,
             })

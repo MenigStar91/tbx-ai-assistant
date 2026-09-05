@@ -16,6 +16,36 @@ class ChatRequest(BaseModel):
     # Populated by the API from trusted server-side session state. Direct client
     # values are overwritten at the route boundary.
     previous_plan: "QueryPlan | None" = None
+    selection: "ClarificationSelection | None" = None
+    pending_clarification: "PendingClarification | None" = None
+
+
+class ClarificationSelection(BaseModel):
+    clarification_id: UUID
+    value: str = Field(min_length=1, max_length=255)
+
+
+class ClarificationOption(BaseModel):
+    label: str
+    value: str
+    description: str | None = None
+
+
+class ClarificationRequest(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    kind: Literal["field", "value", "date_range", "dataset", "permission"]
+    slot: str
+    prompt: str
+    options: list[ClarificationOption] = Field(default_factory=list, max_length=8)
+    allow_search: bool = False
+    search_url: str | None = None
+
+
+class PendingClarification(BaseModel):
+    request: ClarificationRequest
+    original_question: str
+    partial_plan: dict[str, Any]
+    attempts: int = Field(default=0, ge=0, le=2)
 
 
 class ToolExecution(BaseModel):
@@ -35,6 +65,7 @@ class QueryPlan(BaseModel):
     operation: Literal["list", "count", "sum", "average", "minimum", "maximum"]
     measure: str | None = None
     group_by: list[str] = Field(default_factory=list, max_length=3)
+    select: list[str] = Field(default_factory=list, max_length=12)
     filters: list[QueryFilter] = Field(default_factory=list, max_length=10)
     limit: int = Field(default=50, ge=1, le=200)
 
@@ -70,12 +101,15 @@ class ChatResponse(BaseModel):
     tool_executions: list[ToolExecution] = Field(default_factory=list)
     suggested_actions: list[str] = Field(default_factory=list)
     query_plan: QueryPlan | None = None
+    clarification: ClarificationRequest | None = None
+    pending_clarification: PendingClarification | None = Field(default=None, exclude=True)
 
 
 class ConversationState(BaseModel):
     session_id: UUID
     history: list[Message] = Field(default_factory=list, max_length=12)
     last_plan: QueryPlan | None = None
+    pending_clarification: PendingClarification | None = None
 
 
 class ProviderResponse(BaseModel):

@@ -16,6 +16,7 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/generated/
 data/runtime/
+**/data/runtime/
 *.duckdb
 
 # runtime state, never data

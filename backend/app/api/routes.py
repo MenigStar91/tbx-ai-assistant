@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from httpx import HTTPError
 from uuid import UUID
@@ -8,6 +8,7 @@ from app.assistant.service import AssistantService
 from app.config import get_settings
 from app.data.catalog import DatasetCatalog
 from app.data.source_factory import create_catalog
+from app.data.factory import get_dataset_catalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
 from app.data.conversations import ConversationStore
@@ -37,11 +38,19 @@ async def health() -> dict[str, str]:
 @router.get("/info")
 async def info() -> dict:
     """Machine-readable demo contract for the UI and judges."""
+    settings = get_settings()
     return {
-        "purpose": "Grounded analytics over TBX bank, account and transaction data",
+        "purpose": "Grounded analytics over an introspected financial database",
         "model_calls_per_answer": 1,
-        "calculation_engine": "DuckDB deterministic SQL",
-        "safe_datasets": ["bank", "account", "transaction"],
+        "active_provider": settings.llm_provider,
+        "configured_model": (
+            settings.sarvam_model if settings.llm_provider == "sarvam"
+            else settings.openai_model if settings.llm_provider == "openai"
+            else "keyword-baseline"
+        ),
+        "calculation_engine": "MySQL parameterized deterministic SQL",
+        "schema_source": "cached INFORMATION_SCHEMA extraction; POST /datasets/refresh after DDL changes",
+        "safe_datasets": list(get_dataset_catalog().describe()),
         "protected_fields": {
             "account_number": "last four only",
             "utr_number": "not exposed or plaintext-searchable",
@@ -56,6 +65,16 @@ async def info() -> dict:
             "stored_messages": 12,
             "stored_state": "compact messages and last validated query plan",
             "evidence_rows_stored": False,
+        },
+        "query_safeguards": {
+            "runtime_user": "read-only MySQL account",
+            "read_endpoint": settings.mysql_read_host,
+            "required_time_filter_tables": sorted(settings.time_filter_tables),
+            "max_evidence_or_group_rows": settings.max_result_rows,
+            "query_timeout_ms": settings.mysql_query_timeout_ms,
+            "max_estimated_query_cost": settings.mysql_max_query_cost,
+            "runtime_explain": "EXPLAIN FORMAT=JSON",
+            "explain_analyze": "controlled benchmark only" if not settings.mysql_explain_analyze else "enabled",
         },
         "evaluation": "evals/questions.json and docs/evaluation/MODEL_SCORECARD.md",
     }
@@ -76,13 +95,33 @@ async def datasets() -> dict:
     return {"datasets": create_catalog(get_settings()).describe()}
 
 
+@router.get("/datasets/{dataset}/values")
+async def dataset_values(
+    dataset: str,
+    column: str,
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=8, ge=1, le=20),
+) -> dict:
+    """Bounded type-ahead for clarification choices; never sent to the LLM."""
+    try:
+        values, has_more = get_dataset_catalog().search_values(dataset, column, q, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"values": values, "has_more": has_more}
+
+
+@router.post("/datasets/refresh")
+async def refresh_datasets() -> dict:
+    return {"datasets": get_dataset_catalog().refresh()}
+
+
 @router.post("/datasets/upload")
 async def upload_datasets(files: list[UploadFile] = File(...)) -> dict:
     catalog = create_catalog(get_settings())
     saved = []
     for upload in files:
         try:
-            saved.append(catalog.save_upload(upload.filename or "dataset.csv", await upload.read()))
+            saved.append(catalog.import_csv(upload.filename or "dataset.csv", await upload.read()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"uploaded": saved, "catalog": catalog.describe()}
@@ -110,10 +149,12 @@ async def chat(
             # honoured when the store has nothing - otherwise a caller passing
             # previous_plan sees it silently ignored
             "previous_plan": (state.last_plan if state else None) or request.previous_plan,
+            "pending_clarification": state.pending_clarification if state else None,
         })
         response = await service.respond(request)
         conversations.append_turn(
-            request.session_id, request.message, response.answer, response.query_plan
+            request.session_id, request.message, response.answer, response.query_plan,
+            response.pending_clarification,
         )
         return response
     except HTTPError as exc:
@@ -123,4 +164,8 @@ async def chat(
 @router.get("/sessions/{session_id}")
 async def session(session_id: UUID, conversations: ConversationStore = Depends(get_conversation_store)) -> dict:
     state = conversations.load(session_id)
-    return {"session_id": str(session_id), "history": state.history if state else []}
+    return {
+        "session_id": str(session_id),
+        "history": state.history if state else [],
+        "clarification": state.pending_clarification.request if state and state.pending_clarification else None,
+    }

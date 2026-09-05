@@ -4,7 +4,7 @@ An AI assistant for asking plain-language questions about financial operations d
 
 Start with the [documentation map](docs/README.md). For the complete component breakdown, request flow, design rationale, tradeoffs, security analysis and prioritized limitations, read [Architecture Deep Dive](docs/ARCHITECTURE.md).
 
-> **Dataset status:** The final TBX schema is now represented by `bank`, `account`, and `transaction`. The committed rows are synthetic; replace them with the official files without changing the assistant contract.
+> **Data status:** local CSVs are sample-ingestion inputs only. The running assistant always discovers and queries the connected MySQL database directly. The real high-volume TBX database is never copied to CSV.
 
 
 ## Columns we compute
@@ -25,15 +25,21 @@ expose `account_last4` and a boolean `utr_available` instead.
 ## What the starter already supports
 
 - Durable, bounded multi-turn history with deterministic follow-up plan merging
-- Runtime upload and schema discovery for CSV datasets
+- CSV-to-MySQL ingestion for the local sample database
+- Cached live-schema discovery through MySQL `INFORMATION_SCHEMA`
 - Final-schema semantic views with deterministic bank/account joins
 - Account-number masking and complete UTR exclusion from chat and exports
 - Model-generated structured query plans constrained to real datasets and columns
-- Deterministic filtering, grouping and aggregation with DuckDB
+- Deterministic, parameterized filtering, grouping and aggregation in MySQL
+- Read-only runtime credentials, optional replica endpoint and per-session query timeout
+- Explicit list projections, mandatory time scope for broad transactions and bounded evidence
+- Runtime `EXPLAIN FORMAT=JSON` cost guard; opt-in `EXPLAIN ANALYZE` benchmark mode
 - Plain-language explanations generated only after computation
 - Evidence tables containing the underlying records or breakdown
 - CSV export for every computed result
 - Explicit clarification instead of fabricated figures
+- Bounded clarification loop with selectable field/value choices and type-ahead search
+- Cached semantic aliases and a top-3-table/top-20-column planner context
 - Confidence signalling based on whether matching evidence exists
 - Mock mode for developing without API credits
 - Replaceable model provider, initially wired for Sarvam AI
@@ -42,12 +48,12 @@ The TBX relationship is `bank 1—N account 1—N transaction`. The language mod
 
 ## Included synthetic demo data
 
-`data/sample/` contains a small, deterministic version of the final three-table schema. It is entirely synthetic and is loaded by default through `DATA_DIRECTORY=data/sample`.
+Place the local sample CSVs in `data/uploads/`. The Compose seed job imports them into private `source_*` MySQL tables and creates privacy-safe query views. CSV is not used in the chat request path.
 
 Try these immediately in mock mode:
 
 - `How much was debited last month?`
-- `Show transactions for bank code HDFC.`
+- `Show transactions for bank code HDFC last month.`
 - `Break down available balance by bank.`
 - `Find transaction reference ID REF-SYN-0005.`
 
@@ -59,7 +65,7 @@ Generate a larger deterministic dataset without extra dependencies:
 python scripts/generate_dummy_data.py --accounts 10000 --transactions 1000000
 ```
 
-Then set `DATA_DIRECTORY=data/generated`. Generated data is gitignored. Capacity
+Then place the generated files in the configured `SEED_DIRECTORY`. Generated data is gitignored. Capacity
 assumptions and scaling thresholds are documented in
 [Capacity Estimation](docs/architecture/CAPACITY_ESTIMATION.md).
 
@@ -70,7 +76,7 @@ flowchart LR
     A[React chat] --> B[FastAPI]
     B --> C[Lightweight LLM planner]
     C --> D[Validated query plan]
-    D --> E[DuckDB calculation]
+    D --> E[MySQL calculation]
     E --> F[Evidence rows]
     F --> G[Deterministic narration]
     G --> A
@@ -78,17 +84,23 @@ flowchart LR
 
 The language model never calculates totals or writes the final figures. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, reconciles grouped evidence, and renders the answer deterministically. The server retains only the latest 12 compact messages and the last validated plan. Evidence rows are never copied into conversational memory.
 
+Ambiguous fields or dimension values pause execution and return up to eight
+choices. The partial plan is stored server-side; choosing an option resumes it
+without another model call. A debounced search endpoint retrieves further safe
+values with bounded, cost-checked prefix queries, so candidate lists never enter
+the model prompt. The loop stops after two clarification rounds.
+
 ## Repository structure
 
 ```text
 frontend/                 React + TypeScript chat and evidence UI
 backend/app/api/          Chat, upload, catalog and export endpoints
 backend/app/assistant/    Planning and grounded explanation workflow
-backend/app/data/         Schema discovery and deterministic query engine
+backend/app/data/         MySQL introspection, sample ingestion and deterministic query engine
 backend/app/providers/    Mock and Sarvam model adapters
 backend/app/tools/        Extension point for problem-specific tools
 backend/tests/            Guardrail and computation tests
-data/uploads/             Runtime TBX files; contents are gitignored
+data/uploads/             Local sample-ingestion CSVs only; contents are gitignored
 ```
 
 ## Start locally
@@ -120,9 +132,9 @@ SARVAM_MODEL=sarvam-105b
 
 The provider interface is deliberately replaceable. The final lightweight model should be chosen only after the model-efficiency scoring note and capped credits are provided. A locally hosted model can be added as another `LLMProvider` without changing the assistant workflow.
 
-## Load the TBX starter dataset
+## Load the local sample database
 
-Use **Upload TBX CSV files** in the UI or call:
+Put the supplied sample CSVs in `data/uploads/` before the first `docker compose up`, use the UI, or call:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/datasets/upload \
@@ -131,7 +143,23 @@ curl -X POST http://localhost:8000/api/v1/datasets/upload \
   -F 'files=@transaction.csv'
 ```
 
-Inspect the discovered catalog at `GET /api/v1/datasets`. Uploaded contents are excluded from Git. If TBX supplies Excel files, add an Excel-to-CSV adapter in `backend/app/data/catalog.py`; the query and assistant layers remain unchanged.
+The importer retains the files locally, loads them into MySQL, creates safe views and refreshes the catalog. Inspect it at `GET /api/v1/datasets`.
+
+For the real database, configure `MYSQL_READ_HOST`, `MYSQL_PORT`, `MYSQL_DATABASE`,
+`MYSQL_READ_USER` and `MYSQL_READ_PASSWORD`, then run the API without the local
+`seed` service. Point `MYSQL_READ_HOST` at a read replica when TBX provides one;
+otherwise it can target the primary through the same interface. Do not give the
+runtime user write privileges. `MYSQL_WRITE_*` is used only by the local seed job.
+Schema extraction reads metadata only and is cached. After an approved DDL change,
+call `POST /api/v1/datasets/refresh`.
+
+Every runtime query is checked with cost-only `EXPLAIN FORMAT=JSON`, bounded by
+`MYSQL_QUERY_TIMEOUT_MS`, and refused when its estimated cost exceeds
+`MYSQL_MAX_QUERY_COST`. Broad `transaction` queries require a date/time filter;
+exact transaction/reference lookups are exempt. List plans project only requested
+safe columns, and raw evidence or grouped output is capped by `MAX_RESULT_ROWS`.
+For a controlled performance run—not normal requests—set
+`MYSQL_EXPLAIN_ANALYZE=true`; remember that MySQL then executes the explained query.
 
 ## Sample questions for the final submission
 
@@ -139,9 +167,9 @@ These are acceptance-test prompts from the stated scope. Actual answers must be 
 
 1. How much was debited last month?
 2. Break down available balance by bank.
-3. Show transactions for HDFC Bank.
+3. Show transactions for HDFC Bank last month.
 4. Find transaction reference ID REF-SYN-0005.
-5. Show transactions for the account ending in 2345.
+5. Show transactions for the account ending in 2345 last month.
 6. Export that breakdown as CSV.
 
 Do not place placeholder numeric answers in the final presentation. Save the exact question, generated query plan, evidence and response from a reproducible run.
@@ -150,7 +178,7 @@ Do not place placeholder numeric answers in the final presentation. Save the exa
 
 | Criterion | Implementation |
 |---|---|
-| Accuracy and grounding | Allowlisted query plans, parameterized filters and deterministic DuckDB computation |
+| Accuracy and grounding | Allowlisted query plans, parameterized filters and deterministic MySQL computation |
 | Model efficiency | Replaceable provider; model choice deferred until official scoring guidance arrives |
 | Natural-language understanding | Model translates intent, filters, dates and follow-up context into structured plans |
 | Functionality | Chat, upload, query, evidence and export endpoints |
@@ -174,7 +202,7 @@ quarantine and issue workflow is specified in
 
 ## Hack-day checklist
 
-1. Upload `bank.csv`, `account.csv`, and `transaction.csv` with the documented columns.
+1. Import the provided sample CSVs into local MySQL or connect the read-only TBX database user.
 2. Check discovered names and types at `/api/v1/datasets`.
 3. Add aliases only where the official data dictionary requires them.
 4. Benchmark the permitted lightweight model on a fixed question set.
@@ -183,18 +211,12 @@ quarantine and issue workflow is specified in
 7. Add anomaly detection only after grounding tests pass.
 8. Prepare the required architecture diagram and presentation deck.
 
-To switch from the synthetic files without changing code:
-
-```env
-DATA_DIRECTORY=data/uploads
-```
-
-Place the official files in `data/uploads/` or upload them through the UI. The synthetic directory remains separate and cannot contaminate official answers.
-
 ## Known starter limitations
 
-- CSV input only
-- The current adapter expects the final table and column names exactly; aliases belong in `DatasetCatalog`
+- CSV import exists only for constructing the local sample database; the real source must be MySQL-compatible
+- The generic catalog discovers new tables and columns, while cross-table business joins still require approved database views
+- Sample covering indexes match the demo paths; production indexes require TBX workload evidence and `EXPLAIN ANALYZE`
+- A columnar warehouse/replica is the production scaling path for large analytical scans, not a demo dependency
 - UTR plaintext lookup is intentionally unsupported because the source may encrypt it
 - In-memory exports expire when the API restarts
 - Conversation sessions are keyed by an unguessable UUID; authentication and tenant ownership must be added before production use

@@ -1,0 +1,17 @@
+from typing import Any, Protocol
+
+
+class DatasetCatalogProtocol(Protocol):
+    """Stable boundary shared by MySQL runtime and lightweight test fixtures."""
+
+    def connection(self) -> Any: ...
+
+    def describe(self) -> dict[str, list[dict[str, str]]]: ...
+
+    def date_bounds(self) -> tuple[str | None, str | None]: ...
+
+    def column_date_bounds(self) -> dict[str, tuple[str, str]]: ...
+
+    def search_values(
+        self, dataset: str, column: str, query: str, limit: int = 8
+    ) -> tuple[list[str], bool]: ...

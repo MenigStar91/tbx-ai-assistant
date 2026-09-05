@@ -30,13 +30,19 @@ def test_grouped_count_reconciles(engine):
 
 
 def test_a_complete_listing_reconciles(engine):
-    result = engine.execute(QueryPlan(dataset="transactions", operation="list", limit=200))
+    result = engine.execute(QueryPlan(
+        dataset="transactions", operation="list",
+        select=["transaction_id", "vendor_name", "amount"], limit=200
+    ))
     assert result.evidence.reconciles is True
     assert "All 12" in result.evidence.reconcile_note
 
 
 def test_a_truncated_listing_is_marked_unverified_not_failed(engine):
-    result = engine.execute(QueryPlan(dataset="transactions", operation="list", limit=5))
+    result = engine.execute(QueryPlan(
+        dataset="transactions", operation="list",
+        select=["transaction_id", "vendor_name", "amount"], limit=5
+    ))
     assert result.evidence.reconciles is None
     assert "5 of 12" in result.evidence.reconcile_note
 

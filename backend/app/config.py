@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 45.0
     cors_origins: str = "http://localhost:5173"
     data_directory: str = "data/uploads"
+    seed_directory: str = "data/uploads"
+    upload_directory: str = "data/uploads"
     # DATA_BACKEND=mysql reads the three tables straight from MySQL with a
     # SELECT-only grant; anything else keeps the file/DuckDB path.
     data_backend: str = "files"
@@ -30,6 +32,11 @@ class Settings(BaseSettings):
     mysql_database: str = "tbx"
     mysql_user: str = ""
     mysql_password: str = ""
+    mysql_query_timeout_ms: int = 5_000
+    mysql_max_query_cost: float = 100_000.0
+    mysql_explain_analyze: bool = False
+    require_time_filter_tables: str = "transaction"
+    data_max_date: str = ""
     max_result_rows: int = 200
     conversation_db_path: str = "data/runtime/conversations.db"
 
@@ -40,21 +47,27 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @property
-    def resolved_data_directory(self) -> str:
-        """DATA_DIRECTORY is written relative to the repo root, but uvicorn is
-        usually launched from backend/. Resolving against the project root means
-        the same .env works from either directory."""
-        candidate = Path(self.data_directory)
+    def _resolved_directory(self, value: str) -> str:
+        candidate = Path(value)
         if candidate.is_absolute():
             return str(candidate)
-        root = Path(__file__).resolve().parents[2]
-        rooted = root / candidate
-        return str(rooted if rooted.exists() else candidate)
+        return str(Path(__file__).resolve().parents[2] / candidate)
+
+    @property
+    def resolved_seed_directory(self) -> str:
+        return self._resolved_directory(self.seed_directory)
+
+    @property
+    def resolved_upload_directory(self) -> str:
+        return self._resolved_directory(self.upload_directory)
 
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def time_filter_tables(self) -> set[str]:
+        return {name.strip() for name in self.require_time_filter_tables.split(",") if name.strip()}
 
 
 @lru_cache

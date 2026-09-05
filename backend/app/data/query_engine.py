@@ -31,7 +31,7 @@ class GroundedQueryEngine:
     }
     FILTERS = {"eq": "=", "neq": "<>", "gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
 
-    def __init__(self, catalog: DatasetCatalog):
+    def __init__(self, catalog: DatasetCatalogProtocol):
         self.catalog = catalog
         # When the database is not ours - TBX grants SELECT only - the safe
         # surface cannot be a view there, so it is inlined into every query.
@@ -93,7 +93,9 @@ class GroundedQueryEngine:
         if plan.dataset not in available:
             raise ValueError(f"Dataset '{plan.dataset}' is not available")
         columns = {column["name"] for column in available[plan.dataset]}
-        requested = set(plan.group_by) | {item.column for item in plan.filters}
+        if hasattr(self.catalog, "validate_plan"):
+            self.catalog.validate_plan(plan)
+        requested = set(plan.group_by) | set(plan.select) | {item.column for item in plan.filters}
         if plan.measure:
             requested.add(plan.measure)
         unknown = requested - columns
@@ -101,6 +103,8 @@ class GroundedQueryEngine:
             raise ValueError(f"Unknown columns: {', '.join(sorted(unknown))}")
         if plan.operation not in {"list", "count"} and not plan.measure:
             raise ValueError(f"Operation '{plan.operation}' requires a measure")
+        if plan.operation == "list" and not plan.select:
+            raise ValueError("List queries require an explicit column projection")
 
         quoted_groups = [f'"{column}"' for column in plan.group_by]
         if plan.operation == "list":
@@ -138,9 +142,17 @@ class GroundedQueryEngine:
         # groups silently changes the answer. Aggregates are already one row per
         # group, so they are returned whole.
         query_parameters = list(parameters)
+        max_rows = int(getattr(self.catalog, "max_result_rows", 200))
         if plan.operation == "list":
-            sql += " LIMIT ?"
-            query_parameters.append(plan.limit)
+            # MySQL can reject parameter markers in LIMIT when the same query is
+            # wrapped by EXPLAIN. Both values are validated bounded integers, so
+            # rendering this one literal is safe; all user filter values remain
+            # parameterized.
+            sql += f" LIMIT {min(plan.limit, max_rows)}"
+        elif quoted_groups:
+            # Fetch one sentinel group so an oversized breakdown is refused,
+            # never silently truncated and presented as a reconciled whole.
+            sql += f" LIMIT {max_rows + 1}"
 
         connection = self.catalog.connection()
 
@@ -200,4 +212,3 @@ class GroundedQueryEngine:
             export_id=str(uuid4()),
         )
         return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)
-

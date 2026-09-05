@@ -15,17 +15,16 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 async def main() -> int:
     os.environ.setdefault("LLM_PROVIDER", "mock")
-    os.environ.setdefault("DATA_DIRECTORY", "data/sample")
     from app.assistant.service import AssistantService
     from app.config import get_settings
-    from app.data.catalog import DatasetCatalog
+    from app.data.factory import get_dataset_catalog
     from app.providers.factory import create_provider
     from app.schemas import ChatRequest, Message
     from app.tools.registry import ToolRegistry
 
     cases = json.loads((Path(__file__).parent / "follow_up_questions.json").read_text())["conversations"]
     settings = get_settings()
-    catalog = DatasetCatalog(str((ROOT / settings.data_directory).resolve()))
+    catalog = get_dataset_catalog()
     service = AssistantService(create_provider(settings), ToolRegistry(), catalog)
     passed = total = 0
 

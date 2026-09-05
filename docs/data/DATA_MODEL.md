@@ -31,7 +31,7 @@ erDiagram
 
 ## Assistant-safe contract
 
-Raw CSVs are private `_source_*` views. The planner sees only:
+Local CSVs are imported into private `source_*` MySQL tables. The real environment is queried directly. The planner sees the introspected, privacy-filtered catalog:
 
 | View | Added/changed fields | Protection |
 |---|---|---|
@@ -39,9 +39,9 @@ Raw CSVs are private `_source_*` views. The planner sees only:
 | `account` | `bank_name`, `account_last4` | Full account number removed |
 | `transaction` | Entity, bank, program and account-last4 from fixed joins | UTR removed; only `utr_available` exposed |
 
-The LLM selects one safe view. It does not construct joins. This prevents
+The LLM selects one exposed table or safe view. It does not construct joins. New tables and columns are discovered from `INFORMATION_SCHEMA`; optional `COLUMN_COMMENT` text is included when present. This prevents
 join fan-out, keeps prompts smaller and makes relationship changes local to
-`DatasetCatalog._create_tbx_views()`.
+the query plan from inventing schema, while business joins remain explicit database views rather than model-generated SQL.
 
 ## Supported complex intents
 
