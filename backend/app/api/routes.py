@@ -6,7 +6,7 @@ from functools import lru_cache
 
 from app.assistant.service import AssistantService
 from app.config import get_settings
-from app.data.catalog import DatasetCatalog
+from app.data.factory import get_dataset_catalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
 from app.data.conversations import ConversationStore
@@ -25,7 +25,7 @@ def get_conversation_store() -> ConversationStore:
 
 def get_assistant_service() -> AssistantService:
     settings = get_settings()
-    return AssistantService(create_provider(settings), ToolRegistry(), DatasetCatalog(settings.resolved_data_directory))
+    return AssistantService(create_provider(settings), ToolRegistry(), get_dataset_catalog())
 
 
 @router.get("/health")
@@ -37,10 +37,11 @@ async def health() -> dict[str, str]:
 async def info() -> dict:
     """Machine-readable demo contract for the UI and judges."""
     return {
-        "purpose": "Grounded analytics over TBX bank, account and transaction data",
+        "purpose": "Grounded analytics over an introspected financial database",
         "model_calls_per_answer": 1,
-        "calculation_engine": "DuckDB deterministic SQL",
-        "safe_datasets": ["bank", "account", "transaction"],
+        "calculation_engine": "MySQL parameterized deterministic SQL",
+        "schema_source": "cached INFORMATION_SCHEMA extraction; POST /datasets/refresh after DDL changes",
+        "safe_datasets": list(get_dataset_catalog().describe()),
         "protected_fields": {
             "account_number": "last four only",
             "utr_number": "not exposed or plaintext-searchable",
@@ -72,16 +73,21 @@ async def metrics() -> dict:
 
 @router.get("/datasets")
 async def datasets() -> dict:
-    return {"datasets": DatasetCatalog(get_settings().resolved_data_directory).describe()}
+    return {"datasets": get_dataset_catalog().describe()}
+
+
+@router.post("/datasets/refresh")
+async def refresh_datasets() -> dict:
+    return {"datasets": get_dataset_catalog().refresh()}
 
 
 @router.post("/datasets/upload")
 async def upload_datasets(files: list[UploadFile] = File(...)) -> dict:
-    catalog = DatasetCatalog(get_settings().resolved_data_directory)
+    catalog = get_dataset_catalog()
     saved = []
     for upload in files:
         try:
-            saved.append(catalog.save_upload(upload.filename or "dataset.csv", await upload.read()))
+            saved.append(catalog.import_csv(upload.filename or "dataset.csv", await upload.read()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"uploaded": saved, "catalog": catalog.describe()}
