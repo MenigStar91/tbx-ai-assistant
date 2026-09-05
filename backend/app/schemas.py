@@ -35,6 +35,7 @@ class QueryPlan(BaseModel):
     operation: Literal["list", "count", "sum", "average", "minimum", "maximum"]
     measure: str | None = None
     group_by: list[str] = Field(default_factory=list, max_length=3)
+    select: list[str] = Field(default_factory=list, max_length=12)
     filters: list[QueryFilter] = Field(default_factory=list, max_length=10)
     limit: int = Field(default=50, ge=1, le=200)
 
