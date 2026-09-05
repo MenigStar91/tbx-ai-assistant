@@ -16,6 +16,10 @@ function ClarificationChoices({ clarification, apiUrl, disabled, choose }: {
   const [options, setOptions] = useState(clarification.options);
   useEffect(() => {
     if (!clarification.allow_search || !clarification.search_url) return;
+    if (!query.trim()) {
+      setOptions(clarification.options);
+      return;
+    }
     const timer = window.setTimeout(() => {
       fetch(`${apiUrl}${clarification.search_url}${encodeURIComponent(query)}`)
         .then((response) => response.ok ? response.json() : Promise.reject())
@@ -23,7 +27,7 @@ function ClarificationChoices({ clarification, apiUrl, disabled, choose }: {
         .catch(() => undefined);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [apiUrl, clarification, query]);
+  }, [apiUrl, clarification.allow_search, clarification.options, clarification.search_url, query]);
   return <div className="clarification">
     {clarification.allow_search && <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search available values…" />}
     <div className="clarification-options">{options.map((option) =>
