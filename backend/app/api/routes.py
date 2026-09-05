@@ -6,6 +6,7 @@ from app.assistant.service import AssistantService
 from app.config import get_settings
 from app.data.catalog import DatasetCatalog
 from app.data.exports import export_store
+from app.data.metrics import metrics_store
 from app.providers.factory import create_provider
 from app.schemas import ChatRequest, ChatResponse
 from app.tools.registry import ToolRegistry
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/api/v1")
 
 def get_assistant_service() -> AssistantService:
     settings = get_settings()
-    return AssistantService(create_provider(settings), ToolRegistry(), DatasetCatalog(settings.data_directory))
+    return AssistantService(create_provider(settings), ToolRegistry(), DatasetCatalog(settings.resolved_data_directory))
 
 
 @router.get("/health")
@@ -23,14 +24,24 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/metrics")
+async def metrics() -> dict:
+    """Measured token and latency cost per query, overall and per model.
+
+    This is what the model-efficiency criterion and the model-choice slide are
+    argued from - estimates are not good enough.
+    """
+    return metrics_store.summary()
+
+
 @router.get("/datasets")
 async def datasets() -> dict:
-    return {"datasets": DatasetCatalog(get_settings().data_directory).describe()}
+    return {"datasets": DatasetCatalog(get_settings().resolved_data_directory).describe()}
 
 
 @router.post("/datasets/upload")
 async def upload_datasets(files: list[UploadFile] = File(...)) -> dict:
-    catalog = DatasetCatalog(get_settings().data_directory)
+    catalog = DatasetCatalog(get_settings().resolved_data_directory)
     saved = []
     for upload in files:
         try:

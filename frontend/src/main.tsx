@@ -61,7 +61,7 @@ function App() {
 
   return <main>
     <section className="shell">
-      <header><span>TBX - BVP Tech Catalyst</span><h1>Answers grounded in financial data.</h1><p>Ask about spend, payouts, vendors and reconciliation. Every number is computed from uploaded records.</p></header>
+      <header><span>TBX - BVP Tech Catalyst</span><h1>Answers grounded in financial data.</h1><p>Ask about balances, credits, debits, banks and transaction references. Every number is computed from uploaded records.</p></header>
       <label className="upload">{uploading ? "Loading datasets..." : "Upload TBX CSV files"}<input type="file" accept=".csv" multiple onChange={(e) => upload(e.target.files)} disabled={uploading}/></label>
       <div className="messages">
         {messages.length === 0 && <div className="empty">Ask a question to verify the complete local flow.</div>}

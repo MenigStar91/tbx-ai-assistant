@@ -3,8 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": {"dev": "vite --host 0.0.0.0", "build": "tsc && vite build"},
-  "dependencies": {"@vitejs/plugin-react": "latest", "vite": "latest", "typescript": "latest", "react": "latest", "react-dom": "latest"},
-  "devDependencies": {"@types/react": "latest", "@types/react-dom": "latest"}
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "//": "Versions are PINNED. 'latest' churned the tree on every install and pulled vite 8, whose rolldown native binding segfaults (SIGBUS) on this machine's glibc 2.31. Do not loosen these before the demo.",
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "5.2.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  }
 }
-

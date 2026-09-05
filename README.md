@@ -4,12 +4,14 @@ An AI assistant for asking plain-language questions about financial operations d
 
 For the complete component breakdown, request flow, design rationale, tradeoffs, security analysis and prioritized limitations, read [Architecture Deep Dive](docs/ARCHITECTURE.md).
 
-> **Dataset status:** TBX will provide the starter dataset when teams meet. No private or invented sample data is committed here. The ingestion layer discovers CSV names and columns at runtime, so the provided files can be added without redesigning the application.
+> **Dataset status:** The final TBX schema is now represented by `bank`, `account`, and `transaction`. The committed rows are synthetic; replace them with the official files without changing the assistant contract.
 
 ## What the starter already supports
 
 - Free-form chat with multi-turn history
 - Runtime upload and schema discovery for CSV datasets
+- Final-schema semantic views with deterministic bank/account joins
+- Account-number masking and complete UTR exclusion from chat and exports
 - Model-generated structured query plans constrained to real datasets and columns
 - Deterministic filtering, grouping and aggregation with DuckDB
 - Plain-language explanations generated only after computation
@@ -20,17 +22,18 @@ For the complete component breakdown, request flow, design rationale, tradeoffs,
 - Mock mode for developing without API credits
 - Replaceable model provider, initially wired for Sarvam AI
 
-The expected TBX resources include transactions, vendor payouts, reconciliation status, chart of accounts, vendor list and a data dictionary. Their precise schemas are intentionally not assumed.
+The TBX relationship is `bank 1—N account 1—N transaction`. The language model queries only safe semantic views; it never generates joins or sees the raw sensitive columns.
 
 ## Included synthetic demo data
 
-`data/sample/` contains a small, deterministic finance-operations dataset with the same resource categories named by TBX. It is entirely synthetic and is loaded by default through `DATA_DIRECTORY=data/sample`.
+`data/sample/` contains a small, deterministic version of the final three-table schema. It is entirely synthetic and is loaded by default through `DATA_DIRECTORY=data/sample`.
 
 Try these immediately in mock mode:
 
-- `How much did we spend on vendor payouts last month?` - computes INR 958,750 from August 2026 payout rows.
-- `Which transactions are unreconciled?` - returns the two matching source transactions.
-- `Break down unreconciled spend by vendor.` - returns a vendor-level computed breakdown.
+- `How much was debited last month?`
+- `Show transactions for bank code HDFC.`
+- `Break down available balance by bank.`
+- `Find transaction reference ID REF-SYN-0005.`
 
 Mock mode uses a deliberately small rule-based planner for these acceptance paths. It exists for local plumbing tests, not as the final natural-language model.
 
@@ -43,11 +46,11 @@ flowchart LR
     C --> D[Validated query plan]
     D --> E[DuckDB calculation]
     E --> F[Evidence rows]
-    F --> G[LLM explanation]
+    F --> G[Deterministic narration]
     G --> A
 ```
 
-The language model never calculates totals. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, and only then asks the model to explain the evidence.
+The language model never calculates totals or writes the final figures. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, reconciles grouped evidence, and renders the answer deterministically.
 
 ## Repository structure
 
@@ -95,9 +98,9 @@ Use **Upload TBX CSV files** in the UI or call:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/datasets/upload \
-  -F 'files=@transactions.csv' \
-  -F 'files=@vendor_payouts.csv' \
-  -F 'files=@reconciliation_status.csv'
+  -F 'files=@bank.csv' \
+  -F 'files=@account.csv' \
+  -F 'files=@transaction.csv'
 ```
 
 Inspect the discovered catalog at `GET /api/v1/datasets`. Uploaded contents are excluded from Git. If TBX supplies Excel files, add an Excel-to-CSV adapter in `backend/app/data/catalog.py`; the query and assistant layers remain unchanged.
@@ -106,11 +109,11 @@ Inspect the discovered catalog at `GET /api/v1/datasets`. Uploaded contents are 
 
 These are acceptance-test prompts from the stated scope. Actual answers must be captured only after running them against the official dataset.
 
-1. How much did we spend on vendor payouts last month?
-2. Which transactions are still unreconciled?
-3. Break down unreconciled value by vendor.
-4. How does last month's vendor payout total compare with the previous month?
-5. Show the records behind that total.
+1. How much was debited last month?
+2. Break down available balance by bank.
+3. Show transactions for HDFC Bank.
+4. Find transaction reference ID REF-SYN-0005.
+5. Show transactions for the account ending in 2345.
 6. Export that breakdown as CSV.
 
 Do not place placeholder numeric answers in the final presentation. Save the exact question, generated query plan, evidence and response from a reproducible run.
@@ -129,7 +132,7 @@ Do not place placeholder numeric answers in the final presentation. Save the exa
 
 ## Hack-day checklist
 
-1. Upload the TBX-provided files.
+1. Upload `bank.csv`, `account.csv`, and `transaction.csv` with the documented columns.
 2. Check discovered names and types at `/api/v1/datasets`.
 3. Add aliases only where the official data dictionary requires them.
 4. Benchmark the permitted lightweight model on a fixed question set.
@@ -148,7 +151,9 @@ Place the official files in `data/uploads/` or upload them through the UI. The s
 
 ## Known starter limitations
 
-- CSV input only until the official file format is known
+- CSV input only
+- The current adapter expects the final table and column names exactly; aliases belong in `DatasetCatalog`
+- UTR plaintext lookup is intentionally unsupported because the source may encrypt it
 - In-memory exports expire when the API restarts
 - Conversation history is supplied by the browser rather than persisted
 - Mock mode validates plumbing, not language understanding
