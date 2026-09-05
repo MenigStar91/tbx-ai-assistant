@@ -40,6 +40,12 @@ With 100 peak questions/second and 2.25 seconds P95, Little’s Law gives about
 225 concurrent in-flight requests. The model provider is likely the bottleneck;
 rate limits and observed latency should determine worker count, not CPU alone.
 
+Each successful chat response reports `pre_model_ms`, `planning_ms`, `database_ms`
+and `total_ms`. Compare warmed P50/P95 values: connection pools and metadata/cost
+caches make warmed measurements representative, while the first request also
+includes schema discovery and provider connection setup. Common ungrouped totals
+use one data statement; grouped results retain count and reconciliation statements.
+
 ## Token and cost envelope
 
 The current design makes one model call. A target envelope is 350 input + 100

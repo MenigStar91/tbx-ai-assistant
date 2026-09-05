@@ -153,11 +153,15 @@ class AssistantService:
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._vocabulary_cache.get(signature)
         if cached is None:
-            connection = self.catalog.connection()
-            try:
-                cached = guards.build_vocabulary(catalog, connection, self._source_for())
-            finally:
-                connection.close()
+            metadata_vocabulary = getattr(self.catalog, "schema_vocabulary", None)
+            if callable(metadata_vocabulary):
+                cached = metadata_vocabulary()
+            else:
+                connection = self.catalog.connection()
+                try:
+                    cached = guards.build_vocabulary(catalog, connection, self._source_for())
+                finally:
+                    connection.close()
             self._vocabulary_cache[signature] = cached
         return cached
 
@@ -166,11 +170,15 @@ class AssistantService:
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._values_cache.get(signature)
         if cached is None:
-            connection = self.catalog.connection()
-            try:
-                cached = guards.build_values(catalog, connection, self._source_for())
-            finally:
-                connection.close()
+            metadata_values = getattr(self.catalog, "entity_values", None)
+            if callable(metadata_values):
+                cached = metadata_values()
+            else:
+                connection = self.catalog.connection()
+                try:
+                    cached = guards.build_values(catalog, connection, self._source_for())
+                finally:
+                    connection.close()
             self._values_cache[signature] = cached
         return cached
 
@@ -197,11 +205,15 @@ class AssistantService:
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._column_values_cache.get(signature)
         if cached is None:
-            connection = self.catalog.connection()
-            try:
-                cached = guards.build_column_values(catalog, connection, self._source_for())
-            finally:
-                connection.close()
+            metadata_values = getattr(self.catalog, "column_values", None)
+            if callable(metadata_values):
+                cached = metadata_values()
+            else:
+                connection = self.catalog.connection()
+                try:
+                    cached = guards.build_column_values(catalog, connection, self._source_for())
+                finally:
+                    connection.close()
             self._column_values_cache[signature] = cached
         return cached
 
@@ -395,7 +407,18 @@ class AssistantService:
                     )
 
 
-            missing = guards.unsupported_subject(request.message, vocabulary)
+            # On production MySQL, row values are validated lazily with a
+            # bounded indexed lookup. Do not reject a capitalised candidate
+            # such as HDFC merely because it is not schema metadata.
+            candidate_words = {
+                word.lower()
+                for phrase in guards.candidate_entities(request.message)
+                for word in re.findall(r"[a-zA-Z]+", phrase)
+            }
+            missing = [
+                word for word in guards.unsupported_subject(request.message, vocabulary)
+                if word not in candidate_words
+            ]
             if missing:
                 available = ", ".join(sorted(catalog))
                 return self._refuse(
@@ -442,12 +465,14 @@ class AssistantService:
         # wrong. Replaying history also made the planner sticky: asked to widen
         # ("and total spent?") it copied the previous bank filter straight back.
         planner_messages.append(Message(role="user", content=request.message))
+        planning_started = time.monotonic()
         planned = (
             ProviderResponse(content=json.dumps(resumed_plan), model="clarification-selection")
             if resumed_plan is not None
             else await self.provider.generate(planner_messages)
         )
 
+        planning_finished = time.monotonic()
         try:
             raw_plan = resumed_plan or self._json_object(planned.content)
         except (json.JSONDecodeError, IndexError):
@@ -567,7 +592,9 @@ class AssistantService:
             plan = QueryPlan.model_validate(raw_plan)
             plan, follow_up_repairs = merge_follow_up(plan, request.previous_plan, request.message)
             repairs.extend(follow_up_repairs)
+            database_started = time.monotonic()
             result = GroundedQueryEngine(self.catalog).execute(plan)
+            database_ms = int((time.monotonic() - database_started) * 1000)
         except (ValidationError, ValueError, duckdb.Error) as exc:
             # a raw pydantic traceback is not an answer; say what went wrong plainly
             detail = str(exc).split("\n")[0]
@@ -631,6 +658,9 @@ class AssistantService:
                 "tokens_in": planned.tokens_in,
                 "tokens_out": planned.tokens_out,
                 "latency_ms": planned.latency_ms,
+                "pre_model_ms": int((planning_started - started) * 1000),
+                "planning_ms": int((planning_finished - planning_started) * 1000),
+                "database_ms": database_ms,
                 "total_ms": int((time.monotonic() - started) * 1000),
                 "model_calls": 1,
             },

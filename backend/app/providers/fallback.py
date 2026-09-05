@@ -33,3 +33,8 @@ class FallbackProvider:
             response = await self.fallback.generate(messages)
             response.model = f"{response.model} (fallback)"
             return response
+
+    async def aclose(self) -> None:
+        close = getattr(self.primary, "aclose", None)
+        if callable(close):
+            await close()

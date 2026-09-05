@@ -214,6 +214,13 @@ subject to a session timeout and cost-only `EXPLAIN FORMAT=JSON`. Controlled loa
 tests may enable `EXPLAIN ANALYZE`; it is off in requests because it executes the
 query before the real execution.
 
+The request path reuses one assistant, introspected catalog and provider connection
+pool per API process. Metadata and bounded `EXPLAIN` decisions are cached, while
+high-cardinality fact values are resolved lazily through indexed prefix searches.
+Ungrouped totals combine the aggregate and matching-row count in one statement.
+Grouped answers intentionally keep an independent whole-versus-parts query: removing
+that read would improve latency at the cost of the reconciliation guarantee.
+
 ### Stage E - evidence generation
 
 MySQL returns the bounded rows and column names. The backend builds an `Evidence` object containing:

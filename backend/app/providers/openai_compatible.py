@@ -23,6 +23,20 @@ from app.schemas import Message, ProviderResponse
 class OpenAICompatibleProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.settings.openai_base_url.rstrip("/"),
+                timeout=self.settings.request_timeout_seconds,
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def _payload(self, messages: list[Message], json_mode: bool) -> dict:
         payload: dict = {
@@ -43,23 +57,20 @@ class OpenAICompatibleProvider:
         if self.settings.openai_api_key:
             headers["authorization"] = f"Bearer {self.settings.openai_api_key}"
 
-        async with httpx.AsyncClient(
-            base_url=self.settings.openai_base_url.rstrip("/"),
-            timeout=self.settings.request_timeout_seconds,
-        ) as client:
-            started = time.monotonic()
+        client = self._http_client()
+        started = time.monotonic()
+        response = await client.post(
+            "/chat/completions", json=self._payload(messages, True), headers=headers
+        )
+        # not every OpenAI-compatible server implements response_format;
+        # the ones that don't reject the whole request, so retry plainly
+        if response.status_code in (400, 422):
             response = await client.post(
-                "/chat/completions", json=self._payload(messages, True), headers=headers
+                "/chat/completions", json=self._payload(messages, False), headers=headers
             )
-            # not every OpenAI-compatible server implements response_format;
-            # the ones that don't reject the whole request, so retry plainly
-            if response.status_code in (400, 422):
-                response = await client.post(
-                    "/chat/completions", json=self._payload(messages, False), headers=headers
-                )
-            response.raise_for_status()
-            body = response.json()
-            latency_ms = int((time.monotonic() - started) * 1000)
+        response.raise_for_status()
+        body = response.json()
+        latency_ms = int((time.monotonic() - started) * 1000)
 
         usage = body.get("usage") or {}
         return ProviderResponse(
