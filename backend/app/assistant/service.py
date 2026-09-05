@@ -49,6 +49,7 @@ __CATALOG__
 FORMAT:
 {"dataset":"<table>","operation":"list|count|sum|average|minimum|maximum",
  "measure":"<numeric column or null>","group_by":["<column>"],
+ "select":["<columns required for list output; empty for aggregates>"],
  "filters":[{"column":"<column>","operator":"eq|neq|contains|gte|lte|gt|lt","value":<value>}],
  "limit":50}
 
@@ -56,6 +57,7 @@ RULES:
 - Every column you name must exist in the dataset you chose. Never mix tables.
 - "how much"/"total"/"spend" -> sum. "how many"/"count" -> count. Otherwise list.
 - measure is null for list and count.
+- select only the columns needed to answer a list question (maximum 12). Use [] for aggregates.
 - group_by only when the question asks for a breakdown ("by vendor", "per category").
 - A date range is TWO filters: gte the first day, lte the last day.
 - Never invent a column or a value. If the question cannot be answered from these
@@ -66,13 +68,13 @@ A period outside that span has no rows. Do not shift it to one that does.
 
 EXAMPLES:
 Q: How much was debited last month?
-{"dataset":"transaction","operation":"sum","measure":"transaction_amount","group_by":[],"filters":[{"column":"transaction_type","operator":"eq","value":"debit"},{"column":"transaction_date","operator":"gte","value":"__LAST_MONTH_START__"},{"column":"transaction_date","operator":"lte","value":"__LAST_MONTH_END__"}],"limit":50}
+{"dataset":"transaction","operation":"sum","measure":"transaction_amount","group_by":[],"select":[],"filters":[{"column":"transaction_type","operator":"eq","value":"debit"},{"column":"transaction_date","operator":"gte","value":"__LAST_MONTH_START__"},{"column":"transaction_date","operator":"lte","value":"__LAST_MONTH_END__"}],"limit":50}
 
 Q: Show transactions for bank code HDFC
-{"dataset":"transaction","operation":"list","measure":null,"group_by":[],"filters":[{"column":"bank_code","operator":"eq","value":"HDFC"}],"limit":50}
+{"dataset":"transaction","operation":"list","measure":null,"group_by":[],"select":["transaction_date","transaction_type","transaction_amount","transaction_reference_id","bank_code"],"filters":[{"column":"bank_code","operator":"eq","value":"HDFC"}],"limit":50}
 
 Q: Break down available balance by bank
-{"dataset":"account","operation":"sum","measure":"available_balance","group_by":["bank_name"],"filters":[],"limit":50}
+{"dataset":"account","operation":"sum","measure":"available_balance","group_by":["bank_name"],"select":[],"filters":[],"limit":50}
 """
 
 
