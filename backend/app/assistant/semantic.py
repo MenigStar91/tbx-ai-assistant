@@ -10,7 +10,12 @@ from difflib import SequenceMatcher
 ALIASES = {
     "available_balance": {"available balance", "available funds", "funds available", "balance"},
     "ledger_balance": {"ledger balance", "book balance"},
-    "transaction_amount": {"transaction amount", "amount", "spend", "spent", "paid"},
+    "transaction_amount": {
+        "transaction amount", "amount", "spend", "spent", "paid", "payment amount",
+        "debit amount", "credit amount", "received amount", "outflow amount", "inflow amount",
+    },
+    "transaction_date": {"transaction date", "date", "payment date", "posting date"},
+    "transaction_type": {"transaction type", "direction", "debit or credit", "cash flow type"},
     "bank_name": {"bank", "bank name"},
     "bank_code": {"bank code"},
     "vendor_name": {"vendor", "vendor name", "supplier", "merchant"},

@@ -25,6 +25,20 @@ def test_clear_alias_resolves_to_physical_field():
     assert ambiguity is None
 
 
+def test_directional_amount_alias_maps_to_transaction_amount():
+    catalog = {"transaction": [
+        {"name": "transaction_amount", "type": "decimal"},
+        {"name": "transaction_type", "type": "varchar"},
+    ]}
+    plan, _, ambiguity = resolve_plan_fields(
+        {"dataset": "transaction", "operation": "sum", "measure": "credit amount",
+         "group_by": [], "select": [], "filters": []},
+        catalog,
+    )
+    assert plan["measure"] == "transaction_amount"
+    assert ambiguity is None
+
+
 def test_ambiguous_balance_is_not_guessed():
     _, _, ambiguity = resolve_plan_fields(
         {"dataset": "account", "operation": "sum", "measure": "balance",

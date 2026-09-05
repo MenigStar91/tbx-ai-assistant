@@ -1,5 +1,7 @@
-"""The repeatable mistakes a sub-1B planner makes, and the repairs for them."""
-from app.assistant.repair import repair_plan
+"""The repeatable mistakes a small planner makes, and the repairs for them."""
+from datetime import date
+
+from app.assistant.repair import repair_plan, resolve_period
 
 CATALOG = {
     "transactions": [
@@ -129,3 +131,81 @@ def test_unreconciled_style_wording_keeps_neq():
          "filters": [{"column": "reconciliation_status", "operator": "neq", "value": "reconciled"}]},
         "Which transactions are still outstanding?", CATALOG)
     assert plan["filters"][0]["operator"] == "neq"
+
+
+def test_plural_dataset_name_is_repaired_without_fuzzy_guessing():
+    plan, repairs = repair_plan(
+        {"dataset": "transaction", "operation": "count", "filters": []},
+        "How many transactions?", CATALOG,
+    )
+    assert plan["dataset"] == "transactions"
+    assert any("resolved dataset" in item for item in repairs)
+
+
+def test_plan_moves_to_the_only_table_with_all_requested_fields():
+    catalog = {
+        "account": [{"name": "bank_name", "type": "VARCHAR"}],
+        "transaction": [
+            {"name": "bank_name", "type": "VARCHAR"},
+            {"name": "transaction_amount", "type": "DECIMAL"},
+            {"name": "transaction_type", "type": "VARCHAR"},
+        ],
+    }
+    plan, repairs = repair_plan(
+        {"dataset": "account", "operation": "sum", "measure": "transaction_amount",
+         "group_by": [], "filters": [{"column": "bank_name", "operator": "eq", "value": "HDFC"}]},
+        "How much did we spend at HDFC?", catalog,
+    )
+    assert plan["dataset"] == "transaction"
+    assert any("moved dataset" in item for item in repairs)
+
+
+def test_spend_moves_before_measure_inference_when_model_chose_account():
+    catalog = {
+        "account": [
+            {"name": "available_balance", "type": "DECIMAL"},
+            {"name": "bank_name", "type": "VARCHAR"},
+        ],
+        "transaction": [
+            {"name": "transaction_amount", "type": "DECIMAL"},
+            {"name": "transaction_type", "type": "VARCHAR"},
+            {"name": "bank_name", "type": "VARCHAR"},
+        ],
+    }
+    plan, repairs = repair_plan(
+        {"dataset": "account", "operation": "sum", "measure": None,
+         "group_by": [], "filters": []},
+        "How much did we spend?", catalog,
+    )
+    assert plan["dataset"] == "transaction"
+    assert plan["measure"] == "transaction_amount"
+    assert plan["filters"][-1]["value"] == "debit"
+    assert any("requires transaction direction" in item for item in repairs)
+
+
+def test_spend_and_receive_enforce_transaction_direction_even_with_a_typo():
+    catalog = {"transaction": [
+        {"name": "transaction_amount", "type": "DECIMAL"},
+        {"name": "transaction_type", "type": "VARCHAR"},
+    ]}
+    spent, _ = repair_plan(
+        {"dataset": "transaction", "operation": "sum", "measure": "transaction_amount",
+         "filters": [{"column": "transaction_type", "operator": "eq", "value": "credit"}]},
+        "How much did we spned?", catalog,
+    )
+    received, _ = repair_plan(
+        {"dataset": "transaction", "operation": "sum", "measure": "transaction_amount", "filters": []},
+        "How much was received?", catalog,
+    )
+    assert spent["filters"][-1]["value"] == "debit"
+    assert received["filters"][-1]["value"] == "credit"
+
+
+def test_named_month_range_is_resolved_deterministically():
+    start, end, _ = resolve_period("Spend from May-June 2026", date(2026, 9, 1))
+    assert start == date(2026, 5, 1)
+    assert end == date(2026, 6, 30)
+
+
+def test_modal_may_is_not_read_as_a_month():
+    assert resolve_period("We may spend more", date(2026, 9, 1)) is None
