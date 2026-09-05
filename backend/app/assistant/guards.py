@@ -42,13 +42,25 @@ QUERY_LEXICON: set[str] = set(
     now same about instead
     run ran within including excluding also then than data dataset row rows
     inr rupees rupee crore lakh lakhs usd gst gstin tds utr
-    receive received receives receiving receipt receipts inflow inflows outflow outflows
-    deposit deposits withdrawal withdrawals incoming outgoing branch ifsc
+    find look lookup search locate fetch get pull retrieve trace ending starting
+    containing matching named called number numbered digits last four ref refs id ids
+    receive received receives receiving receipt receipts credit credits debit debits
+    inflow inflows outflow outflows deposit deposits withdrawal withdrawals balance balances
+    bank banks branch entity entities program ledger ifsc reference incoming outgoing
+    about instead rather versus vs compared comparison same again another next then
     above below previous earlier former latter one ones here there mentioned shown
     bank banks debit debits credit credits balance balances available program entity
     reference references id ids identifier identifiers last digits four raw masked
     january february march april may june july august september october november december
     """.split()
+)
+
+# The schema has no reconciliation or matching data. Answering would mean
+# modelling a status the source system does not publish.
+RECONCILIATION_RE = re.compile(
+    r"\b(reconcil\w*|unreconcil\w*|un-?matched|matching\s+status|"
+    r"tally|tallied|settle(?:d|ment)\s+status)\b",
+    re.IGNORECASE,
 )
 
 FORECAST_RE = re.compile(
@@ -130,7 +142,17 @@ _SCRIPTS = [
     ("ml", re.compile(r"[ഀ-ൿ]")),
 ]
 
-MAX_DISTINCT = 400  # a column with more distinct values than this is not a vocabulary
+MAX_DISTINCT = 400
+
+
+def _source(dataset: str, resolver=None) -> str:
+    """What follows FROM for this dataset.
+
+    On a database we own the dataset is a view; on TBX's it is an inlined
+    projection, because we may not create anything there. The resolver is
+    supplied by the caller so the guards do not need to know which.
+    """
+    return resolver(dataset) if resolver else f'"{dataset}"'   # a column with more distinct values than this is not a vocabulary
 
 
 def detect_language(text: str) -> str:
@@ -148,7 +170,7 @@ def _tokenise(value: Any) -> list[str]:
     return [word for word in re.split(r"[^a-zA-Z]+", str(value)) if len(word) > 1]
 
 
-def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckdb.DuckDBPyConnection) -> set[str]:
+def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckdb.DuckDBPyConnection, source_for=None) -> set[str]:
     """Every word the dataset itself contains: column names plus the distinct
     values of low-cardinality text columns (statuses, categories, vendor names).
     """
@@ -161,11 +183,11 @@ def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckd
                 continue
             try:
                 distinct = connection.execute(
-                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM "{dataset}"'
+                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM {_source(dataset, source_for)}'
                 ).fetchone()[0]
                 if distinct and distinct <= MAX_DISTINCT:
                     for (value,) in connection.execute(
-                        f'SELECT DISTINCT "{column["name"]}" FROM "{dataset}" '
+                        f'SELECT DISTINCT "{column["name"]}" FROM {_source(dataset, source_for)} '
                         f'WHERE "{column["name"]}" IS NOT NULL LIMIT {MAX_DISTINCT}'
                     ).fetchall():
                         vocabulary.update(_tokenise(value))
@@ -221,9 +243,16 @@ def unsupported_subject(question: str, data_vocabulary: set[str]) -> list[str]:
     vendor resolved perfectly well.
     """
     known = QUERY_LEXICON | data_vocabulary | COMPANY_SUFFIXES
+    # split on hyphens and slashes: "may-june" is two ordinary words, and
+    # treating it as one unknown token refuses a perfectly clear date range
+    # An identifier the user is quoting back at us - REF-SYN-0005, UTR-..., an
+    # account number - is a value to look for, not a subject we hold no data on.
+    # Stripping them here stops a perfectly good lookup being refused.
+    without_ids = re.sub(r"\b[A-Za-z]{2,}[-_]?[A-Za-z]*[-_]?\d[\w-]*\b", " ", question)
+    without_ids = re.sub(r"\b\d[\d-]*\b", " ", without_ids)
     words = [
         part
-        for token in re.findall(r"[a-zA-Z][a-zA-Z'\-/]{2,}", question.lower())
+        for token in re.findall(r"[a-zA-Z][a-zA-Z'\-/]{2,}", without_ids.lower())
         for part in re.split(r"[-/]", token)
         if len(part) >= 3
     ]
@@ -286,7 +315,8 @@ COMPANY_SUFFIXES = {
     "pvt", "private", "technologies", "tech", "systems", "enterprises", "and", "the",
 }
 
-MATCH_FLOOR = 0.70     # below this the name simply is not in the data; a 0.6
+MATCH_FLOOR = 0.78     # below this the name simply is not in the data; a 0.7
+                       # score between "ebitda" and "debit" is noise, not a hint
                        # match is noise, not a 'did you mean'
 MATCH_CONFIRM = 0.86   # above this, accept it
 
@@ -305,7 +335,7 @@ def _score(query: str, candidate: str) -> float:
     return 0.6 * stripped + 0.4 * min(raw, stripped)
 
 
-def build_values(catalog: dict[str, list[dict[str, str]]], connection) -> list[str]:
+def build_values(catalog: dict[str, list[dict[str, str]]], connection, source_for=None) -> list[str]:
     """Distinct values of low-cardinality text columns: the names a question can
     plausibly be referring to."""
     values: set[str] = set()
@@ -315,12 +345,12 @@ def build_values(catalog: dict[str, list[dict[str, str]]], connection) -> list[s
                 continue
             try:
                 distinct = connection.execute(
-                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM "{dataset}"'
+                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM {_source(dataset, source_for)}'
                 ).fetchone()[0]
                 if not distinct or distinct > MAX_DISTINCT:
                     continue
                 for (value,) in connection.execute(
-                    f'SELECT DISTINCT "{column["name"]}" FROM "{dataset}" '
+                    f'SELECT DISTINCT "{column["name"]}" FROM {_source(dataset, source_for)} '
                     f'WHERE "{column["name"]}" IS NOT NULL LIMIT {MAX_DISTINCT}'
                 ).fetchall():
                     text = str(value).strip()
@@ -336,6 +366,41 @@ ENTITY_CUE_RE = re.compile(
     r"\b(to|from|for|with|pay|paid|pays|billed|vendor|supplier|counterparty|called|named)\s*$",
     re.IGNORECASE,
 )
+
+
+def build_column_values(catalog: dict[str, list[dict[str, str]]], connection, source_for=None) -> dict[str, set[str]]:
+    """Distinct values per "table.column", for low-cardinality text columns only.
+
+    Used to tell an invented filter value from a real one. A filter on a value
+    the column does not contain returns zero rows, and a confident empty result
+    reads to a user exactly like an answer.
+    """
+    index: dict[str, set[str]] = {}
+    for dataset, columns in catalog.items():
+        for column in columns:
+            if "CHAR" not in column["type"].upper() and "STRING" not in column["type"].upper():
+                continue
+            name = column["name"]
+            try:
+                distinct = connection.execute(
+                    f'SELECT COUNT(DISTINCT "{name}") FROM {_source(dataset, source_for)}'
+                ).fetchone()[0]
+                if not distinct or distinct > MAX_DISTINCT:
+                    continue
+                # original casing is kept: it is what gets written back into a
+                # filter, and "hdfc bank limited" is not the stored value
+                values = {
+                    str(v[0]).strip()
+                    for v in connection.execute(
+                        f'SELECT DISTINCT "{name}" FROM {_source(dataset, source_for)} '
+                        f'WHERE "{name}" IS NOT NULL LIMIT {MAX_DISTINCT}'
+                    ).fetchall()
+                }
+                if values:
+                    index[f"{dataset}.{name}"] = values
+            except Exception:  # noqa: BLE001
+                continue
+    return index
 
 
 def candidate_entities(question: str) -> list[str]:

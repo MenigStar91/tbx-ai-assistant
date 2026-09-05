@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "TBX AI Assistant"
+    app_name: str = "FiFi — Financial Findings"
     environment: str = "development"
     llm_provider: Literal["mock", "keyword", "sarvam", "openai"] = "sarvam"
     # when the configured provider fails, degrade to the mock planner instead of
@@ -21,16 +21,17 @@ class Settings(BaseSettings):
     openai_model: str = "qwen2.5:1.5b"
     request_timeout_seconds: float = 45.0
     cors_origins: str = "http://localhost:5173"
+    data_directory: str = "data/uploads"
     seed_directory: str = "data/uploads"
     upload_directory: str = "data/uploads"
-    mysql_read_host: str = "db"
+    # DATA_BACKEND=mysql reads the three tables straight from MySQL with a
+    # SELECT-only grant; anything else keeps the file/DuckDB path.
+    data_backend: str = "files"
+    mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
-    mysql_database: str = "tbx_assistant"
-    mysql_read_user: str = "tbx_readonly"
-    mysql_read_password: str = "tbx-readonly"
-    mysql_write_host: str = "db"
-    mysql_write_user: str = "root"
-    mysql_write_password: str = "local-root-only"
+    mysql_database: str = "tbx"
+    mysql_user: str = ""
+    mysql_password: str = ""
     mysql_query_timeout_ms: int = 5_000
     mysql_max_query_cost: float = 100_000.0
     mysql_explain_analyze: bool = False

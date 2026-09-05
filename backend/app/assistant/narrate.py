@@ -43,6 +43,12 @@ _HI = {
 
 
 def _format_number(value: Any) -> str:
+    # MySQL returns AVG over DECIMAL as Decimal with six places; DuckDB does
+    # not. Money is shown to two either way.
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        value = float(value)
     if isinstance(value, (int, float)):
         if float(value).is_integer():
             return f"{int(value):,}"
@@ -62,6 +68,19 @@ def narrate(plan: QueryPlan, evidence: Evidence, total_matching: int, language: 
     hindi = language == "hi"
 
     if total_matching == 0:
+        other = getattr(evidence, "matches_ignoring_direction", None)
+        if other and not hindi:
+            direction = next(
+                (str(f.value) for f in (plan.filters or []) if f.column == "transaction_type"), "debit"
+            )
+            singular = other == 1
+            opposite = "credit" if direction == "debit" else "debit"
+            return (
+                f"None{_filter_phrase(plan)}. There {'is' if singular else 'are'} {other} "
+                f"transaction{'' if singular else 's'} matching everything else, but "
+                f"{'it is a ' + opposite if singular else 'they are all ' + opposite + 's'}, "
+                f"not {'a ' + direction if singular else direction + 's'}."
+            )
         return _HI["none"] if hindi else (
             f"No rows in {plan.dataset} match that request{_filter_phrase(plan)}. "
             "This is a real empty result, not a failure to answer."
@@ -93,6 +112,18 @@ def narrate(plan: QueryPlan, evidence: Evidence, total_matching: int, language: 
         )
 
     result = evidence.rows[0].get("result") if evidence.rows else None
+    # "spend at Kotak" over an account whose only transaction is a credit is a
+    # true zero, but a bare 0.00 reads like a failure. Say why it is zero.
+    if plan.measure in {"debit_amount", "credit_amount"} and result is not None \
+            and float(result) == 0 and total_matching > 0 and not hindi:
+        direction = "money going out" if plan.measure == "debit_amount" else "money coming in"
+        other = "credits" if plan.measure == "debit_amount" else "debits"
+        return (
+            f"Zero{_filter_phrase(plan)}. {total_matching} transaction"
+            f"{'s' if total_matching != 1 else ''} matched, but none of them are "
+            f"{direction} - they are all {other}."
+        )
+
     word = _OPERATION_WORD.get(plan.operation, plan.operation)
     measure = f" of {plan.measure}" if plan.measure else ""
     if hindi:

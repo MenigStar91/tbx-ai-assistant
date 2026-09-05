@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from app.data.base import DatasetCatalogProtocol
+from app.data.catalog import DatasetCatalog
+from app.data.display import PREFERRED_DISPLAY_COLUMNS
+from app.data.projections import from_clause
 from app.schemas import Evidence, QueryPlan
 
 
@@ -31,6 +33,10 @@ class GroundedQueryEngine:
 
     def __init__(self, catalog: DatasetCatalogProtocol):
         self.catalog = catalog
+        # When the database is not ours - TBX grants SELECT only - the safe
+        # surface cannot be a view there, so it is inlined into every query.
+        self.inline_sources = bool(getattr(catalog, "inline_sources", False))
+        self.source_prefix = getattr(catalog, "source_prefix", "")
 
     # operations where the parts genuinely compose back into the whole.
     # An average of averages is not the overall average, so it is excluded.
@@ -60,8 +66,9 @@ class GroundedQueryEngine:
         agg = self.RECONCILABLE[op]
         expression = "COUNT(*)" if op == "count" else f'{agg}("{plan.measure}")'
         try:
+            source = from_clause(plan.dataset, self.source_prefix, self.inline_sources)
             whole = connection.execute(
-                f'SELECT {expression} FROM "{plan.dataset}"{where}', parameters
+                f"SELECT {expression} FROM {source}{where}", parameters
             ).fetchone()[0]
         except Exception as exc:  # noqa: BLE001 - a failed check must not fail the answer
             return None, f"Reconciliation check could not run ({exc})."
@@ -101,9 +108,10 @@ class GroundedQueryEngine:
 
         quoted_groups = [f'"{column}"' for column in plan.group_by]
         if plan.operation == "list":
-            # Explicit projection is essential for an introspected database:
-            # columns excluded by the privacy catalog must not reappear through *.
-            select = ", ".join(f'"{column}"' for column in plan.select)
+            # a wide joined view is unreadable as a full row dump; show the
+            # columns a person reads, and keep the rest in the CSV export
+            preferred = [c for c in PREFERRED_DISPLAY_COLUMNS.get(plan.dataset, []) if c in columns]
+            select = ", ".join(f'"{c}"' for c in preferred) if preferred else "*"
         else:
             expression = self.OPERATIONS[plan.operation]
             if "{measure}" in expression:
@@ -114,15 +122,21 @@ class GroundedQueryEngine:
         parameters: list[Any] = []
         for item in plan.filters:
             if item.operator == "contains":
-                clauses.append(f'LOWER(CAST("{item.column}" AS VARCHAR)) LIKE LOWER(?)')
+                clauses.append(f'LOWER(CAST("{item.column}" AS CHAR)) LIKE LOWER(?)')
                 parameters.append(f"%{item.value}%")
             else:
                 clauses.append(f'"{item.column}" {self.FILTERS[item.operator]} ?')
                 parameters.append(item.value)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = f'SELECT {select} FROM "{plan.dataset}"{where}'
+        source = from_clause(plan.dataset, self.source_prefix, self.inline_sources)
+        sql = f"SELECT {select} FROM {source}{where}"
         if quoted_groups and plan.operation != "list":
             sql += " GROUP BY " + ", ".join(quoted_groups)
+            # the narration calls out the largest groups, so the rows must be
+            # ordered - otherwise "Largest:" names whichever rows came back first
+            # NULLS LAST is not MySQL syntax; this ordering is portable and
+            # means the same thing on both engines
+            sql += " ORDER BY (result IS NULL), result DESC"
 
         # A LIMIT belongs on a row listing, never on an aggregate: truncating
         # groups silently changes the answer. Aggregates are already one row per
@@ -141,34 +155,41 @@ class GroundedQueryEngine:
             sql += f" LIMIT {max_rows + 1}"
 
         connection = self.catalog.connection()
-        try:
-            if hasattr(connection, "validate_cost"):
-                connection.validate_cost(sql, query_parameters)
 
-            # The true number of rows the filters match, independent of any limit.
-            # Reporting len(rows) here is how "which transactions are unreconciled?"
-            # silently answers 50 when the real answer is 500.
-            count_sql = f'SELECT COUNT(*) FROM "{plan.dataset}"{where}'
-            if hasattr(connection, "validate_cost"):
-                connection.validate_cost(count_sql, parameters)
-            total_matching = connection.execute(count_sql, parameters).fetchone()[0]
+        # The true number of rows the filters match, independent of any limit.
+        # Reporting len(rows) here is how "which transactions are unreconciled?"
+        # silently answers 50 when the real answer is 500.
+        total_matching = connection.execute(
+            f"SELECT COUNT(*) FROM {source}{where}", parameters
+        ).fetchone()[0]
 
-            cursor = connection.execute(sql, query_parameters)
-            names = [item[0] for item in cursor.description]
-            rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
-            if quoted_groups and len(rows) > max_rows:
-                raise ValueError(
-                    f"The breakdown has more than {max_rows} groups; "
-                    "add a filter or choose a narrower grouping"
-                )
+        cursor = connection.execute(sql, query_parameters)
+        names = [item[0] for item in cursor.description]
+        rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
-            # Run the reconciliation check while the connection is still open.
-            reconciles, reconcile_note = self._reconcile(
-                connection, plan, where, parameters, rows, quoted_groups,
-                len(rows), total_matching
-            )
-        finally:
-            connection.close()
+        # run the reconciliation check while the connection is still open
+        # An empty result caused by the direction filter is true but unhelpful:
+        # "no debits at Kotak" is better said as "there are transactions there,
+        # just no outgoing ones". One cheap count, only on the empty path.
+        without_direction = None
+        if total_matching == 0:
+            others = [c for item, c in zip(plan.filters, clauses)
+                      if item.column != "transaction_type"]
+            other_params = [p for item, p in zip(plan.filters, parameters)
+                            if item.column != "transaction_type"]
+            if len(others) != len(clauses):
+                relaxed = (" WHERE " + " AND ".join(others)) if others else ""
+                try:
+                    without_direction = connection.execute(
+                        f"SELECT COUNT(*) FROM {source}{relaxed}", other_params
+                    ).fetchone()[0]
+                except Exception:  # noqa: BLE001
+                    without_direction = None
+
+        reconciles, reconcile_note = self._reconcile(
+            connection, plan, where, parameters, rows, quoted_groups, len(rows), total_matching
+        )
+        connection.close()
 
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=names)
@@ -187,6 +208,7 @@ class GroundedQueryEngine:
             sql=sql,
             reconciles=reconciles,
             reconcile_note=reconcile_note,
+            matches_ignoring_direction=without_direction,
             export_id=str(uuid4()),
         )
         return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)

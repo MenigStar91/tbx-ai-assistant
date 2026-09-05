@@ -1,10 +1,26 @@
-# TBX Finance Assistant
+# FiFi — Financial Findings
 
 An AI assistant for asking plain-language questions about financial operations data and receiving accurate, traceable answers. Built for the **TBX - BVP Tech Catalyst Hackathon**.
 
 Start with the [documentation map](docs/README.md). For the complete component breakdown, request flow, design rationale, tradeoffs, security analysis and prioritized limitations, read [Architecture Deep Dive](docs/ARCHITECTURE.md).
 
 > **Data status:** local CSVs are sample-ingestion inputs only. The running assistant always discovers and queries the connected MySQL database directly. The real high-volume TBX database is never copied to CSV.
+
+
+## Columns we compute
+
+TBX ships three tables. Four columns on the `transaction` view are **derived by
+this application**, not supplied by TBX, and are documented here so nothing is
+mistaken for source data:
+
+| Column | Derivation | Why |
+|---|---|---|
+| `debit_amount` / `credit_amount` | split of `transaction_amount` by `transaction_type` | "spend" means debits; summing `transaction_amount` adds money in to money out |
+| `signed_amount` | debits negated | net movement in one column |
+| `reconciliation_status` | no reference number and no UTR → `unreconciled`; one of the two missing → `partially_reconciled` | the schema has no reconciliation column, and the assistant states this definition in every answer that relies on it |
+
+`account_number` and `utr_number` never leave the source layer: the public views
+expose `account_last4` and a boolean `utr_available` instead.
 
 ## What the starter already supports
 

@@ -9,12 +9,14 @@ from pydantic import ValidationError
 from app.assistant import guards
 from app.assistant.narrate import allowed_numerals, narrate, verify_numbers
 from app.assistant.repair import repair_plan
+from app.assistant.smalltalk import conversational_reply, too_vague
 from app.assistant.semantic import normalise, relevant_catalog, resolve_plan_fields
-from app.assistant.smalltalk import conversational_reply
 from app.assistant.followups import merge_follow_up
 from app.data.base import DatasetCatalogProtocol
 from app.data.exports import export_store
+from app.data.display import RECONCILIATION_UNAVAILABLE
 from app.data.metrics import metrics_store
+from app.data.projections import from_clause
 from app.data.query_engine import GroundedQueryEngine
 from app.providers.base import LLMProvider
 from app.schemas import (
@@ -95,6 +97,7 @@ class AssistantService:
     """
 
     _vocabulary_cache: dict[str, set[str]] = {}
+    _column_values_cache: dict[str, dict[str, set[str]]] = {}
     _bounds_cache: dict[str, tuple[str | None, str | None]] = {}
     _values_cache: dict[str, list[str]] = {}
     _column_bounds_cache: dict[str, dict[str, tuple[str, str]]] = {}
@@ -150,14 +153,11 @@ class AssistantService:
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._vocabulary_cache.get(signature)
         if cached is None:
-            if hasattr(self.catalog, "schema_vocabulary"):
-                cached = self.catalog.schema_vocabulary()
-            else:
-                connection = self.catalog.connection()
-                try:
-                    cached = guards.build_vocabulary(catalog, connection)
-                finally:
-                    connection.close()
+            connection = self.catalog.connection()
+            try:
+                cached = guards.build_vocabulary(catalog, connection, self._source_for())
+            finally:
+                connection.close()
             self._vocabulary_cache[signature] = cached
         return cached
 
@@ -166,14 +166,11 @@ class AssistantService:
         signature = json.dumps(catalog, sort_keys=True)
         cached = self._values_cache.get(signature)
         if cached is None:
-            if hasattr(self.catalog, "entity_values"):
-                cached = self.catalog.entity_values()
-            else:
-                connection = self.catalog.connection()
-                try:
-                    cached = guards.build_values(catalog, connection)
-                finally:
-                    connection.close()
+            connection = self.catalog.connection()
+            try:
+                cached = guards.build_values(catalog, connection, self._source_for())
+            finally:
+                connection.close()
             self._values_cache[signature] = cached
         return cached
 
@@ -183,6 +180,29 @@ class AssistantService:
         if cached is None:
             cached = self.catalog.column_date_bounds()
             self._column_bounds_cache[signature] = cached
+        return cached
+
+    def _source_for(self):
+        """How this catalog's datasets are reached in SQL.
+
+        A database we own exposes views; a read-only one needs the projection
+        inlined into every statement.
+        """
+        inline = bool(getattr(self.catalog, "inline_sources", False))
+        prefix = getattr(self.catalog, "source_prefix", "")
+        return lambda dataset: from_clause(dataset, prefix, inline)
+
+    def _column_values(self, catalog: dict) -> dict[str, set[str]]:
+        """Distinct values per column, for spotting an invented filter."""
+        signature = json.dumps(catalog, sort_keys=True)
+        cached = self._column_values_cache.get(signature)
+        if cached is None:
+            connection = self.catalog.connection()
+            try:
+                cached = guards.build_column_values(catalog, connection, self._source_for())
+            finally:
+                connection.close()
+            self._column_values_cache[signature] = cached
         return cached
 
     def _anchor(self, catalog: dict) -> tuple[date, str | None, str | None]:
@@ -310,6 +330,16 @@ class AssistantService:
                 ],
             )
 
+        # with a previous plan in hand a two-word message is a refinement
+        # ("For HDFC?"), not an unanswerable fragment
+        if request.previous_plan is None and (vague := too_vague(request.message)) is not None:
+            metrics_store.record(question=request.message, model="pre-model-guard",
+                                 refused=True, reason="too_vague")
+            return ChatResponse(
+                session_id=request.session_id, answer=vague, confidence="low",
+                clarification_needed=True, refusal_reason="too_vague", language=language,
+            )
+
         # ---- deterministic guards, before any model call (zero tokens) --------
         # English-only by construction, so Indic input skips them and relies on
         # plan validation instead, which is language-agnostic.
@@ -323,6 +353,11 @@ class AssistantService:
             if capability:
                 message, reason = capability
                 return self._refuse(request, message, language, reason)
+
+            if guards.RECONCILIATION_RE.search(request.message):
+                return self._refuse(
+                    request, RECONCILIATION_UNAVAILABLE, language, "no_reconciliation_data"
+                )
 
             if guards.FORECAST_RE.search(request.message):
                 return self._refuse(
@@ -401,9 +436,11 @@ class AssistantService:
                 role="system",
                 content="PREVIOUS_VALIDATED_PLAN=" + request.previous_plan.model_dump_json(),
             ))
-        # Context is carried by the compact, validated previous plan and merged
-        # deterministically after generation. Replaying prose history costs
-        # tokens and can make the planner copy stale filters into a wider query.
+        # The transcript is deliberately NOT sent. Context is carried by merging
+        # the previous QueryPlan in Python (app/assistant/followups.py), so the
+        # model never has to resolve what "that" referred to and cannot get it
+        # wrong. Replaying history also made the planner sticky: asked to widen
+        # ("and total spent?") it copied the previous bank filter straight back.
         planner_messages.append(Message(role="user", content=request.message))
         planned = (
             ProviderResponse(content=json.dumps(resumed_plan), model="clarification-selection")
@@ -430,7 +467,7 @@ class AssistantService:
         # of repeatable mistakes that are cheaper to correct than to prompt away
         raw_plan, repairs = repair_plan(
             raw_plan, request.message, catalog, self._values(catalog), anchor,
-            self._column_bounds(catalog),
+            self._column_bounds(catalog), self._column_values(catalog),
         )
         raw_plan, mappings, ambiguity = resolve_plan_fields(raw_plan, catalog)
         repairs.extend(mappings)
@@ -459,6 +496,19 @@ class AssistantService:
                 clarification=clarification,
                 pending_clarification=pending,
                 usage=planned.model_dump(exclude={"content"}),
+            )
+
+        # A filter on a value the column does not contain is an invented filter.
+        # Answering "no rows match" would present a bad plan as a real finding.
+        if unresolved := raw_plan.pop("_unresolved", None):
+            column, value, examples = unresolved[0]
+            return self._refuse(
+                request,
+                f'There is no {column} of "{value}" in this data, so I cannot answer that. '
+                f'Values I do have include: {", ".join(examples)}.',
+                language,
+                f"invented_filter:{column}={value}",
+                planned,
             )
 
         # Resolve low-cardinality values from MySQL, not from model memory. Only
@@ -553,7 +603,6 @@ class AssistantService:
 
         # ---- narration: templated from the computed result, no model call ----
         answer = narrate(plan, result.evidence, result.total_matching, language)
-
         # tripwire: no numeral may appear in the answer that we did not compute
         verified, orphans = verify_numbers(
             answer, allowed_numerals(result.evidence, result.total_matching, plan.filters)

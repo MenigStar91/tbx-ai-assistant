@@ -6,6 +6,8 @@ from functools import lru_cache
 
 from app.assistant.service import AssistantService
 from app.config import get_settings
+from app.data.catalog import DatasetCatalog
+from app.data.source_factory import create_catalog
 from app.data.factory import get_dataset_catalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
@@ -25,7 +27,7 @@ def get_conversation_store() -> ConversationStore:
 
 def get_assistant_service() -> AssistantService:
     settings = get_settings()
-    return AssistantService(create_provider(settings), ToolRegistry(), get_dataset_catalog())
+    return AssistantService(create_provider(settings), ToolRegistry(), create_catalog(settings))
 
 
 @router.get("/health")
@@ -90,7 +92,7 @@ async def metrics() -> dict:
 
 @router.get("/datasets")
 async def datasets() -> dict:
-    return {"datasets": get_dataset_catalog().describe()}
+    return {"datasets": create_catalog(get_settings()).describe()}
 
 
 @router.get("/datasets/{dataset}/values")
@@ -115,7 +117,7 @@ async def refresh_datasets() -> dict:
 
 @router.post("/datasets/upload")
 async def upload_datasets(files: list[UploadFile] = File(...)) -> dict:
-    catalog = get_dataset_catalog()
+    catalog = create_catalog(get_settings())
     saved = []
     for upload in files:
         try:
@@ -143,7 +145,10 @@ async def chat(
         state = conversations.load(request.session_id)
         request = request.model_copy(update={
             "history": state.history if state else request.history[-12:],
-            "previous_plan": state.last_plan if state else None,
+            # server-held state wins, but a client that tracks its own plan is
+            # honoured when the store has nothing - otherwise a caller passing
+            # previous_plan sees it silently ignored
+            "previous_plan": (state.last_plan if state else None) or request.previous_plan,
             "pending_clarification": state.pending_clarification if state else None,
         })
         response = await service.respond(request)
