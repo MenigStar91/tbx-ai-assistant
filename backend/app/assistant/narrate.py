@@ -43,6 +43,12 @@ _HI = {
 
 
 def _format_number(value: Any) -> str:
+    # MySQL returns AVG over DECIMAL as Decimal with six places; DuckDB does
+    # not. Money is shown to two either way.
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        value = float(value)
     if isinstance(value, (int, float)):
         if float(value).is_integer():
             return f"{int(value):,}"

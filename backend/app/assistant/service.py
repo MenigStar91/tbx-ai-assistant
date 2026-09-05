@@ -15,6 +15,7 @@ from app.data.catalog import DatasetCatalog
 from app.data.exports import export_store
 from app.data.display import RECONCILIATION_UNAVAILABLE
 from app.data.metrics import metrics_store
+from app.data.projections import from_clause
 from app.data.query_engine import GroundedQueryEngine
 from app.providers.base import LLMProvider
 from app.schemas import ChatRequest, ChatResponse, Message, QueryPlan
@@ -138,7 +139,7 @@ class AssistantService:
         if cached is None:
             connection = self.catalog.connection()
             try:
-                cached = guards.build_vocabulary(catalog, connection)
+                cached = guards.build_vocabulary(catalog, connection, self._source_for())
             finally:
                 connection.close()
             self._vocabulary_cache[signature] = cached
@@ -151,7 +152,7 @@ class AssistantService:
         if cached is None:
             connection = self.catalog.connection()
             try:
-                cached = guards.build_values(catalog, connection)
+                cached = guards.build_values(catalog, connection, self._source_for())
             finally:
                 connection.close()
             self._values_cache[signature] = cached
@@ -165,6 +166,16 @@ class AssistantService:
             self._column_bounds_cache[signature] = cached
         return cached
 
+    def _source_for(self):
+        """How this catalog's datasets are reached in SQL.
+
+        A database we own exposes views; a read-only one needs the projection
+        inlined into every statement.
+        """
+        inline = bool(getattr(self.catalog, "inline_sources", False))
+        prefix = getattr(self.catalog, "source_prefix", "")
+        return lambda dataset: from_clause(dataset, prefix, inline)
+
     def _column_values(self, catalog: dict) -> dict[str, set[str]]:
         """Distinct values per column, for spotting an invented filter."""
         signature = json.dumps(catalog, sort_keys=True)
@@ -172,7 +183,7 @@ class AssistantService:
         if cached is None:
             connection = self.catalog.connection()
             try:
-                cached = guards.build_column_values(catalog, connection)
+                cached = guards.build_column_values(catalog, connection, self._source_for())
             finally:
                 connection.close()
             self._column_values_cache[signature] = cached

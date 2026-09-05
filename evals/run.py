@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import os
 import sys
 from pathlib import Path
@@ -28,6 +29,24 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 def load_questions() -> list[dict]:
     return json.loads((Path(__file__).parent / "questions.json").read_text())["questions"]
+
+
+def _expectation_sql(sql: str, catalog) -> str:
+    """Point the ground-truth query at the same surface the app queries.
+
+    On a database we own the datasets are views; on a read-only one they are
+    inlined projections. The expectation has to read the same thing, or it is
+    measuring a different table.
+    """
+    if not getattr(catalog, "inline_sources", False):
+        return sql
+    from app.data.projections import PROJECTIONS, projection_sql
+
+    prefix = getattr(catalog, "source_prefix", "")
+    for dataset in PROJECTIONS:
+        source = f'( {projection_sql(dataset, prefix)} ) AS "{dataset}"'
+        sql = re.sub(rf'FROM\s+"?{dataset}"?\b', f"FROM {source}", sql, flags=re.IGNORECASE)
+    return sql
 
 
 def computed_value(response) -> float | None:
@@ -54,13 +73,18 @@ async def main() -> int:
     from app.assistant.service import AssistantService
     from app.config import get_settings
     from app.data.catalog import DatasetCatalog
+    from app.data.source_factory import create_catalog
     from app.data.metrics import metrics_store
     from app.providers.factory import create_provider
     from app.schemas import ChatRequest
     from app.tools.registry import ToolRegistry
 
     data_dir = str((ROOT / args.data).resolve())
-    catalog = DatasetCatalog(data_dir)
+    # honour DATA_BACKEND so the same questions can be scored against files or MySQL
+    from app.config import get_settings
+    get_settings.cache_clear()
+    settings = get_settings()
+    catalog = create_catalog(settings) if settings.data_backend.lower() == "mysql" else DatasetCatalog(data_dir)
     connection = catalog.connection()
     service = AssistantService(create_provider(get_settings()), ToolRegistry(), catalog)
 
@@ -94,7 +118,7 @@ async def main() -> int:
             continue
 
         sql = item.get("expect_sql") or item["expect_groups_sql"]
-        expected = float(connection.execute(sql).fetchone()[0])
+        expected = float(connection.execute(_expectation_sql(sql, catalog)).fetchone()[0])
         actual = (float(response.evidence.total_groups)
                   if item.get("expect_groups_sql") and response.evidence.total_groups is not None
                   else computed_value(response))

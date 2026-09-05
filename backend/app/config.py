@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 45.0
     cors_origins: str = "http://localhost:5173"
     data_directory: str = "data/uploads"
+    # DATA_BACKEND=mysql reads the three tables straight from MySQL with a
+    # SELECT-only grant; anything else keeps the file/DuckDB path.
+    data_backend: str = "files"
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_database: str = "tbx"
+    mysql_user: str = ""
+    mysql_password: str = ""
     max_result_rows: int = 200
     conversation_db_path: str = "data/runtime/conversations.db"
 

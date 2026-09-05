@@ -132,7 +132,17 @@ _SCRIPTS = [
     ("ml", re.compile(r"[ഀ-ൿ]")),
 ]
 
-MAX_DISTINCT = 400  # a column with more distinct values than this is not a vocabulary
+MAX_DISTINCT = 400
+
+
+def _source(dataset: str, resolver=None) -> str:
+    """What follows FROM for this dataset.
+
+    On a database we own the dataset is a view; on TBX's it is an inlined
+    projection, because we may not create anything there. The resolver is
+    supplied by the caller so the guards do not need to know which.
+    """
+    return resolver(dataset) if resolver else f'"{dataset}"'   # a column with more distinct values than this is not a vocabulary
 
 
 def detect_language(text: str) -> str:
@@ -150,7 +160,7 @@ def _tokenise(value: Any) -> list[str]:
     return [word for word in re.split(r"[^a-zA-Z]+", str(value)) if len(word) > 1]
 
 
-def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckdb.DuckDBPyConnection) -> set[str]:
+def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckdb.DuckDBPyConnection, source_for=None) -> set[str]:
     """Every word the dataset itself contains: column names plus the distinct
     values of low-cardinality text columns (statuses, categories, vendor names).
     """
@@ -163,11 +173,11 @@ def build_vocabulary(catalog: dict[str, list[dict[str, str]]], connection: duckd
                 continue
             try:
                 distinct = connection.execute(
-                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM "{dataset}"'
+                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM {_source(dataset, source_for)}'
                 ).fetchone()[0]
                 if distinct and distinct <= MAX_DISTINCT:
                     for (value,) in connection.execute(
-                        f'SELECT DISTINCT "{column["name"]}" FROM "{dataset}" '
+                        f'SELECT DISTINCT "{column["name"]}" FROM {_source(dataset, source_for)} '
                         f'WHERE "{column["name"]}" IS NOT NULL LIMIT {MAX_DISTINCT}'
                     ).fetchall():
                         vocabulary.update(_tokenise(value))
@@ -315,7 +325,7 @@ def _score(query: str, candidate: str) -> float:
     return 0.6 * stripped + 0.4 * min(raw, stripped)
 
 
-def build_values(catalog: dict[str, list[dict[str, str]]], connection) -> list[str]:
+def build_values(catalog: dict[str, list[dict[str, str]]], connection, source_for=None) -> list[str]:
     """Distinct values of low-cardinality text columns: the names a question can
     plausibly be referring to."""
     values: set[str] = set()
@@ -325,12 +335,12 @@ def build_values(catalog: dict[str, list[dict[str, str]]], connection) -> list[s
                 continue
             try:
                 distinct = connection.execute(
-                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM "{dataset}"'
+                    f'SELECT COUNT(DISTINCT "{column["name"]}") FROM {_source(dataset, source_for)}'
                 ).fetchone()[0]
                 if not distinct or distinct > MAX_DISTINCT:
                     continue
                 for (value,) in connection.execute(
-                    f'SELECT DISTINCT "{column["name"]}" FROM "{dataset}" '
+                    f'SELECT DISTINCT "{column["name"]}" FROM {_source(dataset, source_for)} '
                     f'WHERE "{column["name"]}" IS NOT NULL LIMIT {MAX_DISTINCT}'
                 ).fetchall():
                     text = str(value).strip()
@@ -348,7 +358,7 @@ ENTITY_CUE_RE = re.compile(
 )
 
 
-def build_column_values(catalog: dict[str, list[dict[str, str]]], connection) -> dict[str, set[str]]:
+def build_column_values(catalog: dict[str, list[dict[str, str]]], connection, source_for=None) -> dict[str, set[str]]:
     """Distinct values per "table.column", for low-cardinality text columns only.
 
     Used to tell an invented filter value from a real one. A filter on a value
@@ -363,7 +373,7 @@ def build_column_values(catalog: dict[str, list[dict[str, str]]], connection) ->
             name = column["name"]
             try:
                 distinct = connection.execute(
-                    f'SELECT COUNT(DISTINCT "{name}") FROM "{dataset}"'
+                    f'SELECT COUNT(DISTINCT "{name}") FROM {_source(dataset, source_for)}'
                 ).fetchone()[0]
                 if not distinct or distinct > MAX_DISTINCT:
                     continue
@@ -372,7 +382,7 @@ def build_column_values(catalog: dict[str, list[dict[str, str]]], connection) ->
                 values = {
                     str(v[0]).strip()
                     for v in connection.execute(
-                        f'SELECT DISTINCT "{name}" FROM "{dataset}" '
+                        f'SELECT DISTINCT "{name}" FROM {_source(dataset, source_for)} '
                         f'WHERE "{name}" IS NOT NULL LIMIT {MAX_DISTINCT}'
                     ).fetchall()
                 }

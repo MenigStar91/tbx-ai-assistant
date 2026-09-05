@@ -7,6 +7,7 @@ from functools import lru_cache
 from app.assistant.service import AssistantService
 from app.config import get_settings
 from app.data.catalog import DatasetCatalog
+from app.data.source_factory import create_catalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
 from app.data.conversations import ConversationStore
@@ -25,7 +26,7 @@ def get_conversation_store() -> ConversationStore:
 
 def get_assistant_service() -> AssistantService:
     settings = get_settings()
-    return AssistantService(create_provider(settings), ToolRegistry(), DatasetCatalog(settings.resolved_data_directory))
+    return AssistantService(create_provider(settings), ToolRegistry(), create_catalog(settings))
 
 
 @router.get("/health")
@@ -72,12 +73,12 @@ async def metrics() -> dict:
 
 @router.get("/datasets")
 async def datasets() -> dict:
-    return {"datasets": DatasetCatalog(get_settings().resolved_data_directory).describe()}
+    return {"datasets": create_catalog(get_settings()).describe()}
 
 
 @router.post("/datasets/upload")
 async def upload_datasets(files: list[UploadFile] = File(...)) -> dict:
-    catalog = DatasetCatalog(get_settings().resolved_data_directory)
+    catalog = create_catalog(get_settings())
     saved = []
     for upload in files:
         try:

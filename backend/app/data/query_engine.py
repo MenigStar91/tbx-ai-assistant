@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from app.data.catalog import DatasetCatalog
 from app.data.display import PREFERRED_DISPLAY_COLUMNS
+from app.data.projections import from_clause
 from app.schemas import Evidence, QueryPlan
 
 
@@ -32,6 +33,10 @@ class GroundedQueryEngine:
 
     def __init__(self, catalog: DatasetCatalog):
         self.catalog = catalog
+        # When the database is not ours - TBX grants SELECT only - the safe
+        # surface cannot be a view there, so it is inlined into every query.
+        self.inline_sources = bool(getattr(catalog, "inline_sources", False))
+        self.source_prefix = getattr(catalog, "source_prefix", "")
 
     # operations where the parts genuinely compose back into the whole.
     # An average of averages is not the overall average, so it is excluded.
@@ -61,8 +66,9 @@ class GroundedQueryEngine:
         agg = self.RECONCILABLE[op]
         expression = "COUNT(*)" if op == "count" else f'{agg}("{plan.measure}")'
         try:
+            source = from_clause(plan.dataset, self.source_prefix, self.inline_sources)
             whole = connection.execute(
-                f'SELECT {expression} FROM "{plan.dataset}"{where}', parameters
+                f"SELECT {expression} FROM {source}{where}", parameters
             ).fetchone()[0]
         except Exception as exc:  # noqa: BLE001 - a failed check must not fail the answer
             return None, f"Reconciliation check could not run ({exc})."
@@ -118,7 +124,8 @@ class GroundedQueryEngine:
                 clauses.append(f'"{item.column}" {self.FILTERS[item.operator]} ?')
                 parameters.append(item.value)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = f'SELECT {select} FROM "{plan.dataset}"{where}'
+        source = from_clause(plan.dataset, self.source_prefix, self.inline_sources)
+        sql = f"SELECT {select} FROM {source}{where}"
         if quoted_groups and plan.operation != "list":
             sql += " GROUP BY " + ", ".join(quoted_groups)
             # the narration calls out the largest groups, so the rows must be
@@ -141,7 +148,7 @@ class GroundedQueryEngine:
         # Reporting len(rows) here is how "which transactions are unreconciled?"
         # silently answers 50 when the real answer is 500.
         total_matching = connection.execute(
-            f'SELECT COUNT(*) FROM "{plan.dataset}"{where}', parameters
+            f"SELECT COUNT(*) FROM {source}{where}", parameters
         ).fetchone()[0]
 
         cursor = connection.execute(sql, query_parameters)
@@ -162,7 +169,7 @@ class GroundedQueryEngine:
                 relaxed = (" WHERE " + " AND ".join(others)) if others else ""
                 try:
                     without_direction = connection.execute(
-                        f'SELECT COUNT(*) FROM "{plan.dataset}"{relaxed}', other_params
+                        f"SELECT COUNT(*) FROM {source}{relaxed}", other_params
                     ).fetchone()[0]
                 except Exception:  # noqa: BLE001
                     without_direction = None
