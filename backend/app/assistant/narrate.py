@@ -62,6 +62,19 @@ def narrate(plan: QueryPlan, evidence: Evidence, total_matching: int, language: 
     hindi = language == "hi"
 
     if total_matching == 0:
+        other = getattr(evidence, "matches_ignoring_direction", None)
+        if other and not hindi:
+            direction = next(
+                (str(f.value) for f in (plan.filters or []) if f.column == "transaction_type"), "debit"
+            )
+            singular = other == 1
+            opposite = "credit" if direction == "debit" else "debit"
+            return (
+                f"None{_filter_phrase(plan)}. There {'is' if singular else 'are'} {other} "
+                f"transaction{'' if singular else 's'} matching everything else, but "
+                f"{'it is a ' + opposite if singular else 'they are all ' + opposite + 's'}, "
+                f"not {'a ' + direction if singular else direction + 's'}."
+            )
         return _HI["none"] if hindi else (
             f"No rows in {plan.dataset} match that request{_filter_phrase(plan)}. "
             "This is a real empty result, not a failure to answer."

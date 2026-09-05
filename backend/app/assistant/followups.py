@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import re
 
+from app.data.display import equivalent_to
 from app.schemas import QueryPlan
 
 FOLLOW_UP_RE = re.compile(
     r"\b(now|same|that|those|them|only|instead|previous|prior|month before|"
-    r"what about|how about|do the same|remove|without)\b",
+    r"what about|how about|do the same|remove|without)\b"
+    # a leading connective is the most common way people continue a question:
+    # "And at HDFC?", "For June?", "In Q2?". Missing these silently drops the
+    # previous filters and answers a different question with full confidence.
+    r"|^\s*(and|also|but|or|then|for|in|at|on|by|from)\b",
     re.IGNORECASE,
 )
 OPERATION_RE = re.compile(
@@ -49,6 +54,9 @@ def merge_follow_up(current: QueryPlan, previous: QueryPlan | None, question: st
         if re.search(rf"\b(?:remove|without)\s+(?:the\s+)?{re.escape(label)}\b", lowered):
             remove_columns.add(item.column)
     replacement_columns = {item.column for item in current_filters} | remove_columns
+    # a filter on bank_name replaces an inherited bank_code, and vice versa
+    for item in current_filters:
+        replacement_columns |= equivalent_to(item.column)
     inherited = [item for item in previous.filters if item.column not in replacement_columns]
     updates["filters"] = inherited + current_filters
     if inherited:

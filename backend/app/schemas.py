@@ -50,6 +50,7 @@ class Evidence(BaseModel):
     sql: str | None = None
     reconciles: bool | None = None   # None = the check does not apply to this shape
     reconcile_note: str = ""
+    matches_ignoring_direction: int | None = None
     export_id: str | None = None
 
 

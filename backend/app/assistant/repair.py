@@ -311,20 +311,23 @@ def repair_plan(
                 repairs.append(f'measure {plan.get("measure")!r} is not a column here; used {preferred}')
                 plan["measure"] = preferred
 
-    # ---- 4a2. ledger direction -----------------------------------------------
-    # "how much did we spend" over a bank ledger means debits, not every row.
-    # Summing transaction_amount would add money in to money out.
-    if real_columns and plan.get("operation") in {"sum", "average", "maximum", "minimum"}:
+    # ---- 4a2. ledger direction ------------------------------------------------
+    # "how much did we spend" over a bank ledger means debits. The schema has no
+    # debit/credit split column and we do not add one, so the direction is
+    # expressed as a filter on the real transaction_type column.
+    if real_columns and "transaction_type" in real_columns:
         wants_spend = bool(SPEND_RE.search(question))
         wants_received = bool(RECEIVED_RE.search(question))
-        if wants_spend and not wants_received and "debit_amount" in real_columns \
-                and plan.get("measure") in {"transaction_amount", "amount", "signed_amount", "credit_amount"}:
-            repairs.append(f'used debit_amount instead of {plan["measure"]} (the question asks about money going out)')
-            plan["measure"] = "debit_amount"
-        elif wants_received and not wants_spend and "credit_amount" in real_columns \
-                and plan.get("measure") in {"transaction_amount", "amount", "signed_amount", "debit_amount"}:
-            repairs.append(f'used credit_amount instead of {plan["measure"]} (the question asks about money coming in)')
-            plan["measure"] = "credit_amount"
+        already = any(f.get("column") == "transaction_type" for f in (plan.get("filters") or []))
+        if not already and wants_spend != wants_received:
+            direction = "debit" if wants_spend else "credit"
+            plan["filters"] = (plan.get("filters") or []) + [
+                {"column": "transaction_type", "operator": "eq", "value": direction}
+            ]
+            repairs.append(
+                f"filtered to {direction}s "
+                f"(the question asks about money going {'out' if wants_spend else 'in'})"
+            )
 
     # ---- 4b. a negated filter needs a negation in the question ---------------
     # observed: "how many vendor payouts failed" planned status neq failed, which
@@ -414,7 +417,29 @@ def repair_plan(
             if not known:
                 continue
             lowered = {str(k).strip().lower() for k in known}
-            if str(item.get("value", "")).strip().lower() not in lowered:
+            raw_value = str(item.get("value", "")).strip()
+            if raw_value.lower() not in lowered:
+                # the value may simply be on a sibling column: "Kotak" is not a
+                # bank_code but it is a bank_name. Move the filter instead of
+                # refusing a question the data can answer.
+                from app.assistant.guards import resolve_entity
+
+                moved = False
+                for key, candidates in column_values.items():
+                    table, _, other = key.partition(".")
+                    if table != plan.get("dataset") or other == item.get("column"):
+                        continue
+                    verdict, best, _, _ = resolve_entity(raw_value, sorted(candidates))
+                    if verdict in {"exact", "confident"} and best:
+                        repairs.append(
+                            f'moved filter {item["column"]}="{raw_value}" to {other}="{best}"'
+                        )
+                        item["column"], item["value"] = other, best
+                        moved = True
+                        break
+                if moved:
+                    continue
+            if raw_value.lower() not in lowered:
                 unresolved.append((item.get("column"), item.get("value"), sorted(known)[:5]))
         if unresolved:
             plan["_unresolved"] = unresolved

@@ -147,6 +147,24 @@ class GroundedQueryEngine:
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
         # run the reconciliation check while the connection is still open
+        # An empty result caused by the direction filter is true but unhelpful:
+        # "no debits at Kotak" is better said as "there are transactions there,
+        # just no outgoing ones". One cheap count, only on the empty path.
+        without_direction = None
+        if total_matching == 0:
+            others = [c for item, c in zip(plan.filters, clauses)
+                      if item.column != "transaction_type"]
+            other_params = [p for item, p in zip(plan.filters, parameters)
+                            if item.column != "transaction_type"]
+            if len(others) != len(clauses):
+                relaxed = (" WHERE " + " AND ".join(others)) if others else ""
+                try:
+                    without_direction = connection.execute(
+                        f'SELECT COUNT(*) FROM "{plan.dataset}"{relaxed}', other_params
+                    ).fetchone()[0]
+                except Exception:  # noqa: BLE001
+                    without_direction = None
+
         reconciles, reconcile_note = self._reconcile(
             connection, plan, where, parameters, rows, quoted_groups, len(rows), total_matching
         )
@@ -169,6 +187,7 @@ class GroundedQueryEngine:
             sql=sql,
             reconciles=reconciles,
             reconcile_note=reconcile_note,
+            matches_ignoring_direction=without_direction,
             export_id=str(uuid4()),
         )
         return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)

@@ -105,7 +105,10 @@ async def chat(
         state = conversations.load(request.session_id)
         request = request.model_copy(update={
             "history": state.history if state else request.history[-12:],
-            "previous_plan": state.last_plan if state else None,
+            # server-held state wins, but a client that tracks its own plan is
+            # honoured when the store has nothing - otherwise a caller passing
+            # previous_plan sees it silently ignored
+            "previous_plan": (state.last_plan if state else None) or request.previous_plan,
         })
         response = await service.respond(request)
         conversations.append_turn(

@@ -13,7 +13,7 @@ from app.assistant.smalltalk import conversational_reply, too_vague
 from app.assistant.followups import merge_follow_up
 from app.data.catalog import DatasetCatalog
 from app.data.exports import export_store
-from app.data.display import RECONCILIATION_DEFINITION
+from app.data.display import RECONCILIATION_UNAVAILABLE
 from app.data.metrics import metrics_store
 from app.data.query_engine import GroundedQueryEngine
 from app.providers.base import LLMProvider
@@ -283,6 +283,11 @@ class AssistantService:
                 message, reason = capability
                 return self._refuse(request, message, language, reason)
 
+            if guards.RECONCILIATION_RE.search(request.message):
+                return self._refuse(
+                    request, RECONCILIATION_UNAVAILABLE, language, "no_reconciliation_data"
+                )
+
             if guards.FORECAST_RE.search(request.message):
                 return self._refuse(
                     request,
@@ -436,16 +441,6 @@ class AssistantService:
 
         # ---- narration: templated from the computed result, no model call ----
         answer = narrate(plan, result.evidence, result.total_matching, language)
-
-        # reconciliation_status is computed from missing reference numbers, not
-        # shipped by TBX - state the definition whenever an answer relies on it
-        uses_reconciliation = bool(plan.group_by and "reconciliation_status" in plan.group_by)
-        uses_reconciliation = uses_reconciliation or any(
-            item.column == "reconciliation_status" for item in (plan.filters or [])
-        )
-        if uses_reconciliation and not guards.is_indic(language):
-            answer = f"{answer} {RECONCILIATION_DEFINITION}"
-
         # tripwire: no numeral may appear in the answer that we did not compute
         verified, orphans = verify_numbers(
             answer, allowed_numerals(result.evidence, result.total_matching, plan.filters)

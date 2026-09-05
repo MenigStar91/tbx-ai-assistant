@@ -53,6 +53,14 @@ QUERY_LEXICON: set[str] = set(
     """.split()
 )
 
+# The schema has no reconciliation or matching data. Answering would mean
+# modelling a status the source system does not publish.
+RECONCILIATION_RE = re.compile(
+    r"\b(reconcil\w*|unreconcil\w*|un-?matched|matching\s+status|"
+    r"tally|tallied|settle(?:d|ment)\s+status)\b",
+    re.IGNORECASE,
+)
+
 FORECAST_RE = re.compile(
     r"\b(will|forecast|forecasts|predict|prediction|projected|projection|expect|expected|"
     r"estimate|estimated|next\s+(month|quarter|year|week)|future|upcoming)\b",
