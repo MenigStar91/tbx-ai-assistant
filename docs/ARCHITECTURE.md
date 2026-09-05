@@ -181,7 +181,18 @@ Supported filters:
 - Greater/less than comparisons
 - Case-insensitive substring matching
 
-Supported grouping is limited to three real columns. Results are capped at 200 by the schema, though the configured `max_result_rows` setting is not yet wired into this cap.
+Supported grouping is limited to three real columns. List plans must explicitly
+name their projected columns. Both evidence listings and grouped breakdowns are
+bounded by `max_result_rows`; oversized groupings are refused rather than silently
+truncated. Broad transaction queries require a date/time comparison, except exact
+transaction/reference lookups.
+
+The API connects through `MYSQL_READ_*`, which can point directly at MySQL or at
+a TBX read replica without a code change. The local seed container alone uses
+`MYSQL_WRITE_*` and provisions the demo read-only user. Each runtime statement is
+subject to a session timeout and cost-only `EXPLAIN FORMAT=JSON`. Controlled load
+tests may enable `EXPLAIN ANALYZE`; it is off in requests because it executes the
+query before the real execution.
 
 ### Stage E - evidence generation
 
@@ -286,6 +297,8 @@ For the local demo, place CSVs in `data/uploads` and let the `seed` container im
 - Raw account numbers and UTRs are absent from catalogs, evidence, vocabulary scans and exports.
 - Explicit protected-field requests are refused before a model call.
 - Aggregate breakdowns are reconciled and answer numerals are verified against evidence.
+- The application runtime has SELECT-only credentials; sample ingestion uses separate credentials.
+- Transaction scans require time scope, evidence/group rows are capped and costly plans are refused.
 
 ### What is not yet protected
 
@@ -326,10 +339,9 @@ Evaluation should report these separately. A useful golden test fixture stores t
 3. Export data is held in one process and disappears on restart; multiple workers would have inconsistent stores.
 4. Upload reads the complete file into memory and can overwrite a sanitized filename.
 5. `ToolRegistry` and `percentage_change` are injected but not used by `AssistantService`.
-6. `max_result_rows` is configured but not connected to `QueryPlan.limit`.
-7. Errors from malformed provider payloads, MySQL execution and serialization are not handled uniformly.
-8. Currency aggregation has no guard against summing mixed currencies.
-9. Nulls, refunds, negative amounts and duplicate transaction IDs have no explicit semantics.
+6. Errors from malformed provider payloads, MySQL execution and serialization are not handled uniformly.
+7. Currency aggregation has no guard against summing mixed currencies.
+8. Nulls, refunds, negative amounts and duplicate transaction IDs have no explicit semantics.
 
 ### P2 - production hardening
 
@@ -358,6 +370,10 @@ flowchart TD
 ```
 
 The semantic layer now defines safe joins and protected projections. The next improvement is to version that contract and add TBX-confirmed debit/credit, balance-as-of, duplicate and reversal semantics.
+
+For larger read-heavy workloads, retain the planner and policy contracts while
+routing approved analytical views to a columnar replica or warehouse. That is a
+production scaling option, not another service required for the hackathon demo.
 
 ## 14. Testing strategy
 
