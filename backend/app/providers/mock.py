@@ -74,6 +74,21 @@ class MockProvider:
                 filters.append({"column": "transaction_type", "operator": "eq", "value": "debit"})
             elif "credit" in question and "transaction_type" in column_names:
                 filters.append({"column": "transaction_type", "operator": "eq", "value": "credit"})
+            if "bank_code" in column_names:
+                bank_match = re.search(r"\bbank(?:\s+code)?\s+([a-z0-9_-]+)\b", question)
+                if bank_match:
+                    filters.append({"column": "bank_code", "operator": "eq", "value": bank_match.group(1).upper()})
+            if "transaction_reference_id" in column_names:
+                reference_match = re.search(r"\b(?:reference|ref)(?:\s+id)?\s+([a-z0-9_-]+)\b", question)
+                if reference_match:
+                    filters.append({
+                        "column": "transaction_reference_id", "operator": "eq",
+                        "value": reference_match.group(1).upper(),
+                    })
+            if "account_last4" in column_names:
+                last4_match = re.search(r"\b(?:ending\s+in|last\s+(?:four|4)(?:\s+digits)?)\s+(\d{4})\b", question)
+                if last4_match:
+                    filters.append({"column": "account_last4", "operator": "eq", "value": last4_match.group(1)})
             status_column = "reconciliation_status" if "reconciliation_status" in column_names else "status"
             for status in ("unreconciled", "pending", "reconciled", "completed", "failed", "processing", "scheduled"):
                 if status in question and status_column in column_names:
