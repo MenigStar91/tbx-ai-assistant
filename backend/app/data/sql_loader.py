@@ -80,13 +80,26 @@ def quote_table_names(statement: str, reserved: set[str]) -> str:
 RESERVED_TABLE_NAMES = {"transaction", "order", "group", "table", "select", "values"}
 
 
-def load_sql_file(connection: duckdb.DuckDBPyConnection, path: Path) -> dict[str, int]:
-    """Execute every CREATE TABLE and INSERT in one file. Returns rows per table."""
+def load_sql_file(
+    connection: duckdb.DuckDBPyConnection,
+    path: Path,
+    skip_existing: set[str] | None = None,
+) -> dict[str, int]:
+    """Execute every CREATE TABLE and INSERT in one file. Returns rows per table.
+
+    A directory can legitimately hold the same schema twice - a document and a
+    dump extracted from it, say - so tables already loaded from an earlier file
+    are skipped rather than raising.
+    """
+    skip_existing = skip_existing or set()
     text = path.read_text(encoding="utf-8", errors="ignore")
     creates, inserts = extract_statements(text)
     loaded: dict[str, int] = {}
 
     for statement in creates:
+        name = re.search(r"CREATE\s+TABLE\s+\"?(\w+)\"?", statement, re.IGNORECASE)
+        if name and name.group(1) in skip_existing:
+            continue
         prepared = quote_table_names(translate_ddl(statement), RESERVED_TABLE_NAMES)
         try:
             connection.execute(prepared)
@@ -97,6 +110,8 @@ def load_sql_file(connection: duckdb.DuckDBPyConnection, path: Path) -> dict[str
         prepared = quote_table_names(translate_insert(statement), RESERVED_TABLE_NAMES)
         match = re.search(r"INSERT\s+INTO\s+\"?(\w+)\"?", prepared, re.IGNORECASE)
         table = match.group(1) if match else "?"
+        if table in skip_existing:
+            continue
         try:
             connection.execute(prepared)
             loaded[table] = loaded.get(table, 0) + prepared.count("),(") + prepared.count("),\n")  # rough
@@ -130,8 +145,10 @@ def load_sql_directory(
         text = path.read_text(encoding="utf-8", errors="ignore")
         if not re.search(r"\bINSERT\s+INTO\b", text, re.IGNORECASE):
             continue  # a markdown file with no data in it
-        loaded = load_sql_file(connection, path)
+        loaded = load_sql_file(connection, path, skip_existing=set(totals))
         for table, rows in loaded.items():
+            if table in totals:
+                continue
             if prefix:
                 # rename rather than alias: the public safe view takes the plain
                 # name, and a table already sitting there would collide with it

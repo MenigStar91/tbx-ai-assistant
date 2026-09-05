@@ -1,5 +1,5 @@
 -- Extracted from the TBX schema document. MySQL dialect, unmodified DDL.
--- Load with:  mysql -u <user> -p <database> < data/tbx/tbx_schema.sql
+-- Load with:  mysql -u <user> -p <database> < scripts/tbx_schema.sql
 
 CREATE TABLE bank (
     bank_code    VARCHAR(10)  PRIMARY KEY,
