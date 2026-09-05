@@ -2,11 +2,11 @@
 
 ## 1. Executive summary
 
-The system is a grounded natural-language interface over financial operations data. A user asks a question in React; FastAPI gives a language model the live dataset catalog and asks for a constrained query plan; the backend validates that plan and executes it in DuckDB; only the computed evidence is then sent to the model for explanation. The UI shows both the answer and its source rows.
+The system is a grounded natural-language interface over the final TBX bank, account and transaction schema. React sends a question to FastAPI; one lightweight-model call returns a constrained query plan; the backend repairs and validates it, executes it in DuckDB, reconciles the evidence, and narrates the result deterministically.
 
 The central design rule is:
 
-> The model may interpret and explain. It may not invent datasets, columns, records, or financial calculations.
+> The model may interpret intent. It may not join data, calculate figures, expose protected fields, or write final numbers.
 
 This is intentionally a **hackathon-ready grounded prototype**, not yet a production financial platform. It optimizes for accuracy, explainability, lightweight deployment and rapid adaptation when TBX supplies the official files.
 
@@ -18,7 +18,7 @@ This is intentionally a **hackathon-ready grounded prototype**, not yet a produc
 2. Keep calculations deterministic and testable.
 3. Prevent the model from emitting arbitrary SQL.
 4. Show evidence with every successful answer.
-5. Support unknown CSV schemas without redesigning the application.
+5. Isolate the final TBX schema behind replaceable semantic views.
 6. Keep the model provider replaceable for the model-efficiency evaluation.
 7. Run locally with no model credits through a narrow mock mode.
 
@@ -37,13 +37,13 @@ This is intentionally a **hackathon-ready grounded prototype**, not yet a produc
 flowchart LR
     User[Finance user] --> UI[React chat]
     UI --> API[FastAPI API]
-    API --> Model[Model provider]
+    API --> Model[Planner model]
     API --> Engine[Grounded query engine]
     Engine --> CSV[TBX CSV datasets]
     API --> Export[CSV export store]
 ```
 
-Only FastAPI is externally addressed by the UI. The model cannot access files or DuckDB directly. It receives metadata during planning and bounded result evidence during explanation.
+Only FastAPI is externally addressed by the UI. The model cannot access files or DuckDB directly and receives only safe metadata during planning.
 
 ## 4. Container and runtime view
 
@@ -72,9 +72,9 @@ The repository's `data/` directory is mounted at `/app/data`. `.env` selects `da
 frontend/src/main.tsx              UI state, upload, chat and evidence rendering
 backend/app/main.py                FastAPI bootstrapping and CORS
 backend/app/api/routes.py          HTTP boundary and dependency construction
-backend/app/assistant/service.py   Two-stage grounded orchestration
+backend/app/assistant/service.py   Guarded one-call planning orchestration
 backend/app/providers/             Replaceable language-model boundary
-backend/app/data/catalog.py        CSV discovery and schema introspection
+backend/app/data/catalog.py        CSV discovery and protected semantic views
 backend/app/data/query_engine.py   Query validation, SQL construction and execution
 backend/app/data/exports.py        Temporary CSV export cache
 backend/app/schemas.py             API and internal contract models
@@ -94,13 +94,13 @@ sequenceDiagram
     U->>R: Ask finance question
     R->>A: POST /api/v1/chat
     A->>D: Discover datasets and columns
-    A->>L: Question + history + catalog
+    A->>A: Privacy, scope and entity guards
+    A->>L: Question + safe catalog
     L-->>A: JSON QueryPlan
-    A->>A: Pydantic and allowlist validation
+    A->>A: Repair, Pydantic and allowlist validation
     A->>D: Parameterized deterministic query
     D-->>A: Computed rows
-    A->>L: Question + computed evidence
-    L-->>A: Plain-language explanation
+    A->>A: Reconcile and verify numerals
     A-->>R: Answer + confidence + evidence
     R-->>U: Answer, table and CSV link
 ```
@@ -113,11 +113,11 @@ Tradeoff: this is simple and stateless, but the browser becomes responsible for 
 
 ### Stage B - live schema discovery
 
-`DatasetCatalog.describe()` creates an in-memory DuckDB connection, registers every CSV in the selected directory as a view, and runs `DESCRIBE` on each view. Filenames and column names are normalized.
+`DatasetCatalog.describe()` registers source CSVs as private `_source_*` views and exposes three public views: `bank`, `account`, and `transaction`. The latter two perform fixed foreign-key joins. `account_number` becomes `account_last4`; `utr_number` becomes only `utr_available`.
 
 Why this approach:
 
-- The official TBX schema is not yet available.
+- The final TBX relationships are implemented in one adapter rather than prompted into the model.
 - DuckDB reads CSV directly and infers common types.
 - The planner sees only datasets and columns that actually exist.
 - No database migration is required for initial files.
@@ -138,13 +138,14 @@ The returned object is parsed into `QueryPlan`:
 
 ```json
 {
-  "dataset": "vendor_payouts",
+  "dataset": "transaction",
   "operation": "sum",
-  "measure": "amount",
+  "measure": "transaction_amount",
   "group_by": [],
   "filters": [
-    {"column": "payout_date", "operator": "gte", "value": "2026-08-01"},
-    {"column": "payout_date", "operator": "lte", "value": "2026-08-31"}
+    {"column": "transaction_type", "operator": "eq", "value": "debit"},
+    {"column": "transaction_date", "operator": "gte", "value": "2026-08-01"},
+    {"column": "transaction_date", "operator": "lte", "value": "2026-08-31"}
   ],
   "limit": 50
 }
@@ -250,7 +251,7 @@ This problem is AI- and analytics-first, while authentication, multi-tenancy and
 
 ## 9. Data strategy and replacement of sample data
 
-The synthetic files intentionally mirror only the resource categories promised by TBX. They do not claim to mirror the final schema.
+The synthetic files mirror the final TBX schema and relationships, but contain no TBX-provided records.
 
 ```text
 data/sample/    committed synthetic data
@@ -262,11 +263,11 @@ On hack day:
 1. Set `DATA_DIRECTORY=data/uploads`.
 2. Add or upload the official files.
 3. Inspect `GET /api/v1/datasets`.
-4. Compare inferred columns with the TBX data dictionary.
-5. Add a normalization/semantic layer for aliases and relationships.
+4. Confirm inferred types and the fixed bank/account foreign-key joins.
+5. Add aliases in the semantic adapter only if delivered headers differ.
 6. Run golden questions before changing prompts.
 
-Changing the directory is trivial. Supporting different names is easy. Supporting different semantics is not automatically free: if TBX separates vendor IDs, payouts and reconciliation across normalized files, joins and a semantic model will be required.
+Changing the directory is trivial. The joins and privacy projection remain deterministic; the model continues to target the same public contract.
 
 ## 10. Grounding and security boundaries
 
@@ -279,6 +280,9 @@ Changing the directory is trivial. Supporting different names is easy. Supportin
 - No model-generated HTML is rendered.
 - `.env` and uploaded data are excluded from Git.
 - Missing data returns clarification rather than a guessed answer.
+- Raw account numbers and UTRs are absent from catalogs, evidence, vocabulary scans and exports.
+- Explicit protected-field requests are refused before a model call.
+- Aggregate breakdowns are reconciled and answer numerals are verified against evidence.
 
 ### What is not yet protected
 
@@ -287,7 +291,7 @@ Changing the directory is trivial. Supporting different names is easy. Supportin
 - File malware scanning or CSV formula-injection neutralization on export
 - Concurrent replacement of a CSV during a query
 - Prompt-injection content embedded inside financial fields
-- Sensitive-data minimization before sending evidence to the model
+- Encryption and key management for protected source fields at rest
 - Per-user dataset isolation
 - Audit-grade lineage and immutable dataset versions
 
@@ -307,17 +311,15 @@ Evaluation should report these separately. A useful golden test fixture stores t
 
 ### P0 - required for a credible final demo
 
-1. **No joins.** Reconciliation, vendor and chart-of-accounts files cannot currently be combined unless fields are denormalized.
-2. **No comparison plan.** “Compare with the month before” needs two periods or a time-bucket operator; the DSL supports one query only.
-3. **Simplistic confidence.** Confidence is `high` whenever rows exist, even if the planner was uncertain.
-4. **No planner trace in the response.** Evidence shows a calculation summary but not the full validated plan or SQL-equivalent lineage.
-5. **Model choice unresolved.** The default Sarvam model is not justified against the lightweight constraint.
-6. **Limited tests.** There is no golden NL-to-plan suite, date-boundary suite, empty/null data coverage, or end-to-end API test.
+1. **No comparison plan.** “Compare with the month before” needs two periods or a time-bucket operator; the DSL supports one query only.
+2. **Simplistic confidence.** Confidence is `high` whenever rows exist, even if the planner was uncertain.
+3. **Exact header dependency.** The semantic adapter expects the published table and column names.
+4. **Encrypted UTR search unsupported.** The assistant refuses it instead of pretending plaintext equality works.
+5. **Limited domain semantics.** Debit/credit sign conventions and balance timing still require TBX confirmation.
 
 ### P1 - important engineering improvements
 
-1. `total_rows` means returned rows, not total matching rows before `LIMIT`.
-2. The catalog reopens and rescans all CSV files multiple times per question.
+1. The catalog reopens CSV files per query; only metadata and vocabulary scans are cached.
 3. Export data is held in one process and disappears on restart; multiple workers would have inconsistent stores.
 4. Upload reads the complete file into memory and can overwrite a sanitized filename.
 5. PostgreSQL and `DATABASE_URL` are unused while the API waits for the database container.
@@ -353,7 +355,7 @@ flowchart TD
     Lineage --> Eval[Golden evaluation harness]
 ```
 
-The most valuable next component is a semantic model derived from the official data dictionary. It should define canonical concepts such as `transaction amount`, `payout date`, `reconciliation status`, allowed joins, currency behavior and fiscal/calendar date rules. The planner should target those concepts rather than raw column names.
+The semantic layer now defines safe joins and protected projections. The next improvement is to version that contract and add TBX-confirmed debit/credit, balance-as-of, duplicate and reversal semantics.
 
 ## 14. Testing strategy
 
@@ -394,4 +396,3 @@ This suite directly supports the hackathon's accuracy and model-efficiency scori
 ## 15. Decision summary
 
 The current design is strong where the problem is scored most heavily: it creates a hard boundary between probabilistic interpretation and deterministic finance calculations, and it makes source rows visible. Its greatest weakness is analytical expressiveness, not framework choice. The priority on hack day should therefore be the TBX semantic model, joins/comparisons and a measured lightweight-model evaluation—not adding more infrastructure.
-
