@@ -21,6 +21,26 @@ import calendar
 import re
 from datetime import date, timedelta
 
+SPEND_WORDS = {
+    "spend", "spent", "spending", "paid", "pay", "pays", "payment", "payments",
+    "outflow", "outflows", "debit", "debits", "outgoing", "withdrawal", "withdrawals",
+}
+RECEIVE_WORDS = {
+    "receive", "received", "receiving", "receipt", "receipts", "credit", "credits",
+    "inflow", "inflows", "incoming", "deposit", "deposits",
+}
+
+
+def _mentions(question: str, words: set[str]) -> bool:
+    """Recognise a financial direction while tolerating a small typo."""
+    from app.assistant.guards import looks_like_typo
+
+    return any(
+        token in words or looks_like_typo(token, words)
+        for token in re.findall(r"[a-zA-Z]{3,}", question.lower())
+    )
+
+
 # words that mean the user actually asked for a breakdown
 NEGATION_RE = re.compile(
     r"\b(not|isn'?t|aren'?t|wasn'?t|weren'?t|except|excluding|other\s+than|apart\s+from|"
@@ -101,12 +121,34 @@ def resolve_period(question: str, anchor: date) -> tuple[date, date, str] | None
         _, end = _month_window(year, first + 2)
         return start, end, f"Q{quarter} {year}"
 
+    # Resolve every named month so "May-June 2026" means the whole range.
+    # "May" is treated as a month only when its surrounding text is temporal.
+    named: list[tuple[int, int]] = []
     for name, index in MONTHS.items():
-        if len(name) > 3 and re.search(rf"\b{name}\b", q):
-            year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
-            year = int(year_match.group(1)) if year_match else anchor.year
-            start, end = _month_window(year, index)
-            return start, end, f"{name.title()} {year}"
+        if len(name) <= 3 and name != "may":
+            continue
+        for month_match in re.finditer(rf"\b{name}\b", q):
+            if name == "may":
+                before = q[max(0, month_match.start() - 12):month_match.start()]
+                after = q[month_match.end():month_match.end() + 8]
+                if not re.search(r"\b(in|of|during|for|and|since|from|until|to)\s*$", before) \
+                        and not re.search(r"^\s*(\d{4}|and|to|-)", after):
+                    continue
+            named.append((month_match.start(), index))
+    if named:
+        named.sort()
+        year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
+        year = int(year_match.group(1)) if year_match else anchor.year
+        first_month, last_month = named[0][1], named[-1][1]
+        start_year = year - 1 if first_month > last_month else year
+        start, _ = _month_window(start_year, first_month)
+        _, end = _month_window(year, last_month)
+        label = (
+            f"{calendar.month_name[first_month]} {year}"
+            if first_month == last_month
+            else f"{calendar.month_name[first_month]}-{calendar.month_name[last_month]} {year}"
+        )
+        return start, end, label
 
     if match := re.search(r"\b((?:19|20)\d{2})\b", q):
         year = int(match.group(1))
@@ -130,6 +172,8 @@ def repair_plan(
     """
     repairs: list[str] = []
     plan = dict(plan)
+    wants_spend = _mentions(question, SPEND_WORDS)
+    wants_received = _mentions(question, RECEIVE_WORDS)
 
     # ---- 0. a missing operation is inferable from the question ---------------
     if not plan.get("operation"):
@@ -148,6 +192,19 @@ def repair_plan(
             inferred = "list"
         repairs.append(f"inferred operation={inferred} (the planner omitted it)")
         plan["operation"] = inferred
+
+    # Correct only deterministic table mistakes. Pluralisation is safe; fuzzy
+    # table guessing is left to the clarification flow.
+    selected_dataset = plan.get("dataset")
+    if selected_dataset not in catalog and selected_dataset:
+        wanted = re.sub(r"[^a-z0-9]", "", str(selected_dataset).lower()).rstrip("s")
+        exact = [
+            name for name in catalog
+            if re.sub(r"[^a-z0-9]", "", name.lower()).rstrip("s") == wanted
+        ]
+        if len(exact) == 1:
+            repairs.append(f"resolved dataset {selected_dataset} -> {exact[0]}")
+            plan["dataset"] = exact[0]
 
     # ---- 1. drop a grouping the question never asked for --------------------
     if plan.get("group_by") and not BREAKDOWN_RE.search(question):
@@ -168,6 +225,45 @@ def repair_plan(
         if referenced <= target_columns:
             repairs.append(f"switched dataset {plan.get('dataset')} -> {target} (named in the question)")
             plan["dataset"] = target
+
+    # Cash-flow questions belong to the one table that actually publishes a
+    # transaction direction. This is discovered from the live catalog, not from
+    # a fixed table name.
+    if wants_spend != wants_received:
+        directional_tables = [
+            name for name, columns in catalog.items()
+            if "transaction_type" in {column["name"] for column in columns}
+        ]
+        if len(directional_tables) == 1 and plan.get("dataset") != directional_tables[0]:
+            repairs.append(
+                f"moved dataset {plan.get('dataset')} -> {directional_tables[0]} "
+                "because the question requires transaction direction"
+            )
+            plan["dataset"] = directional_tables[0]
+
+    # If the planner picked a real but unsuitable table, move only when exactly
+    # one live table contains every physical field requested by the plan.
+    chosen_columns = {
+        column["name"] for column in catalog.get(plan.get("dataset"), [])
+    }
+    referenced = {
+        item.get("column") for item in plan.get("filters") or [] if item.get("column")
+    }
+    referenced |= set(plan.get("group_by") or [])
+    referenced |= set(plan.get("select") or [])
+    if plan.get("operation") not in {"count", "list"} and plan.get("measure"):
+        referenced.add(plan["measure"])
+    if referenced - chosen_columns:
+        fitting = [
+            name for name, columns in catalog.items()
+            if referenced <= {column["name"] for column in columns}
+        ]
+        if len(fitting) == 1 and fitting[0] != plan.get("dataset"):
+            repairs.append(
+                f"moved dataset {plan.get('dataset')} -> {fitting[0]} "
+                "because it is the only table containing the requested fields"
+            )
+            plan["dataset"] = fitting[0]
 
     # ---- 3. a measure is meaningless for count/list -------------------------
     if plan.get("operation") in {"count", "list"} and plan.get("measure"):
@@ -212,6 +308,26 @@ def repair_plan(
         if preferred:
             repairs.append(f"set measure={preferred} (required by {plan['operation']})")
             plan["measure"] = preferred
+
+    # Enforce cash-flow direction from the user's wording. This corrects an
+    # omitted or opposite model filter without asking the model to do arithmetic.
+    real_columns = {column["name"] for column in catalog.get(plan.get("dataset"), [])}
+    if "transaction_type" in real_columns:
+        if wants_spend != wants_received:
+            direction = "debit" if wants_spend else "credit"
+            existing = next(
+                (item.get("value") for item in (plan.get("filters") or [])
+                 if item.get("column") == "transaction_type"),
+                None,
+            )
+            plan["filters"] = [
+                item for item in (plan.get("filters") or [])
+                if item.get("column") != "transaction_type"
+            ] + [{"column": "transaction_type", "operator": "eq", "value": direction}]
+            if existing != direction:
+                repairs.append(
+                    f"set transaction_type={direction} from the requested cash-flow direction"
+                )
 
     # ---- 4b. a negated filter needs a negation in the question ---------------
     # observed: "how many vendor payouts failed" planned status neq failed, which

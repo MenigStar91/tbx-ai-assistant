@@ -60,10 +60,14 @@ FORMAT:
 RULES:
 - Every column you name must exist in the dataset you chose. Never mix tables.
 - "how much"/"total"/"spend" -> sum. "how many"/"count" -> count. Otherwise list.
+- "spend"/"paid"/"outflow" means transaction_type=debit; "received"/"inflow"
+  means transaction_type=credit when that field exists. If both appear, do not guess.
 - measure is null for list and count.
 - select only the columns needed to answer a list question (maximum 12). Use [] for aggregates.
 - group_by only when the question asks for a breakdown ("by vendor", "per category").
 - A date range is TWO filters: gte the first day, lte the last day.
+- Bare "reference", "ref no" or "reference id" maps to transaction_reference_id.
+  UTR is protected and must never be substituted for the plaintext reference field.
 - Never invent a column or a value. If the question cannot be answered from these
   tables, return {"clarification":"<what is missing>"}.
 
@@ -397,7 +401,9 @@ class AssistantService:
                 role="system",
                 content="PREVIOUS_VALIDATED_PLAN=" + request.previous_plan.model_dump_json(),
             ))
-        planner_messages.extend(request.history[-12:])
+        # Context is carried by the compact, validated previous plan and merged
+        # deterministically after generation. Replaying prose history costs
+        # tokens and can make the planner copy stale filters into a wider query.
         planner_messages.append(Message(role="user", content=request.message))
         planned = (
             ProviderResponse(content=json.dumps(resumed_plan), model="clarification-selection")

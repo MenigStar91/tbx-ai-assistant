@@ -42,6 +42,9 @@ QUERY_LEXICON: set[str] = set(
     now same about instead
     run ran within including excluding also then than data dataset row rows
     inr rupees rupee crore lakh lakhs usd gst gstin tds utr
+    receive received receives receiving receipt receipts inflow inflows outflow outflows
+    deposit deposits withdrawal withdrawals incoming outgoing branch ifsc
+    above below previous earlier former latter one ones here there mentioned shown
     bank banks debit debits credit credits balance balances available program entity
     reference references id ids identifier identifiers last digits four raw masked
     january february march april may june july august september october november december
@@ -218,7 +221,12 @@ def unsupported_subject(question: str, data_vocabulary: set[str]) -> list[str]:
     vendor resolved perfectly well.
     """
     known = QUERY_LEXICON | data_vocabulary | COMPANY_SUFFIXES
-    words = re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", question.lower())
+    words = [
+        part
+        for token in re.findall(r"[a-zA-Z][a-zA-Z'\-/]{2,}", question.lower())
+        for part in re.split(r"[-/]", token)
+        if len(part) >= 3
+    ]
     unknown = [
         word
         for word in words
@@ -243,7 +251,8 @@ def unresolved_entity(question: str, data_vocabulary: set[str]) -> str | None:
     for phrase in re.findall(r"\b[A-Z][a-zA-Z&.'-]+(?:\s+[A-Z][a-zA-Z&.'-]+)*", question):
         words = [
             word
-            for word in phrase.split()
+            for chunk in phrase.split()
+            for word in re.split(r"[-/]", chunk)
             # a capitalised word that is ordinary query language ("Break down...",
             # "Show me...") is capitalised by grammar, not because it names a thing
             if word.lower() not in QUERY_LEXICON
