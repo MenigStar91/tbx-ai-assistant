@@ -22,6 +22,8 @@ Start with the [documentation map](docs/README.md). For the complete component b
 - Evidence tables containing the underlying records or breakdown
 - CSV export for every computed result
 - Explicit clarification instead of fabricated figures
+- Bounded clarification loop with selectable field/value choices and type-ahead search
+- Cached semantic aliases and a top-3-table/top-20-column planner context
 - Confidence signalling based on whether matching evidence exists
 - Mock mode for developing without API credits
 - Replaceable model provider, initially wired for Sarvam AI
@@ -65,6 +67,12 @@ flowchart LR
 ```
 
 The language model never calculates totals or writes the final figures. It maps the question to a constrained `QueryPlan`; the backend validates dataset and column names, parameterizes filter values, runs the calculation, reconciles grouped evidence, and renders the answer deterministically. The server retains only the latest 12 compact messages and the last validated plan. Evidence rows are never copied into conversational memory.
+
+Ambiguous fields or dimension values pause execution and return up to eight
+choices. The partial plan is stored server-side; choosing an option resumes it
+without another model call. A debounced search endpoint retrieves further safe
+values with bounded, cost-checked prefix queries, so candidate lists never enter
+the model prompt. The loop stops after two clarification rounds.
 
 ## Repository structure
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from httpx import HTTPError
 from uuid import UUID
@@ -40,6 +40,12 @@ async def info() -> dict:
     return {
         "purpose": "Grounded analytics over an introspected financial database",
         "model_calls_per_answer": 1,
+        "active_provider": settings.llm_provider,
+        "configured_model": (
+            settings.sarvam_model if settings.llm_provider == "sarvam"
+            else settings.openai_model if settings.llm_provider == "openai"
+            else "keyword-baseline"
+        ),
         "calculation_engine": "MySQL parameterized deterministic SQL",
         "schema_source": "cached INFORMATION_SCHEMA extraction; POST /datasets/refresh after DDL changes",
         "safe_datasets": list(get_dataset_catalog().describe()),
@@ -87,6 +93,21 @@ async def datasets() -> dict:
     return {"datasets": get_dataset_catalog().describe()}
 
 
+@router.get("/datasets/{dataset}/values")
+async def dataset_values(
+    dataset: str,
+    column: str,
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=8, ge=1, le=20),
+) -> dict:
+    """Bounded type-ahead for clarification choices; never sent to the LLM."""
+    try:
+        values, has_more = get_dataset_catalog().search_values(dataset, column, q, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"values": values, "has_more": has_more}
+
+
 @router.post("/datasets/refresh")
 async def refresh_datasets() -> dict:
     return {"datasets": get_dataset_catalog().refresh()}
@@ -123,10 +144,12 @@ async def chat(
         request = request.model_copy(update={
             "history": state.history if state else request.history[-12:],
             "previous_plan": state.last_plan if state else None,
+            "pending_clarification": state.pending_clarification if state else None,
         })
         response = await service.respond(request)
         conversations.append_turn(
-            request.session_id, request.message, response.answer, response.query_plan
+            request.session_id, request.message, response.answer, response.query_plan,
+            response.pending_clarification,
         )
         return response
     except HTTPError as exc:
@@ -136,4 +159,8 @@ async def chat(
 @router.get("/sessions/{session_id}")
 async def session(session_id: UUID, conversations: ConversationStore = Depends(get_conversation_store)) -> dict:
     state = conversations.load(session_id)
-    return {"session_id": str(session_id), "history": state.history if state else []}
+    return {
+        "session_id": str(session_id),
+        "history": state.history if state else [],
+        "clarification": state.pending_clarification.request if state and state.pending_clarification else None,
+    }

@@ -28,7 +28,10 @@ def _parse_catalog(system: str) -> dict[str, list[dict[str, str]]]:
         name, columns = match.group(1), match.group(2)
         if "," not in columns and " " in columns:
             continue
-        catalog[name] = [{"name": c.strip(), "type": "VARCHAR"} for c in columns.split(",") if c.strip()]
+        catalog[name] = [
+            {"name": c.split(" (", 1)[0].strip(), "type": "VARCHAR"}
+            for c in columns.split(",") if c.strip()
+        ]
     return catalog
 
 

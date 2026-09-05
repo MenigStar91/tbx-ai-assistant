@@ -135,7 +135,7 @@ Tradeoff: metadata reveals structure, not business meaning. Ambiguous names stil
 - The user's question
 - Up to twelve prior messages
 - Today's date for relative date phrases
-- The discovered dataset catalog
+- A deterministic relevance slice of the discovered catalog (at most three tables and twenty columns per table)
 - The exact JSON structure the model must return
 
 The returned object is parsed into `QueryPlan`:
@@ -156,6 +156,26 @@ The returned object is parsed into `QueryPlan`:
 ```
 
 The model does not return SQL. It chooses values inside a deliberately small analytical DSL.
+
+### Stage C2 - semantic resolution and clarification
+
+Reviewed aliases map business phrases such as `available funds`, `bank code`
+and bare `reference number` to exact physical fields. UTR remains a separate
+protected concept and is never substituted for the ordinary transaction
+reference. Unknown model fields are automatically repaired only for one strong,
+well-separated match; close candidates pause the plan and are shown to the user.
+
+Pending clarification state contains the original question, partial plan,
+unresolved slot and allowlisted choices. It is stored in SQLite beside the
+conversation and is never accepted from the browser. A selection resumes without
+another model call. The loop is capped at two rounds and eight visible options.
+
+Safe name/code/status/type values can be searched through
+`GET /api/v1/datasets/{dataset}/values`. The endpoint uses prefix lookup, a
+maximum of twenty results, the normal query-cost guard and the read-only MySQL
+connection. Large value lists are not copied into prompts or conversation state;
+production deployments should provide B-tree indexes on searchable dimension
+columns.
 
 ### Stage D - validation and SQL construction
 
