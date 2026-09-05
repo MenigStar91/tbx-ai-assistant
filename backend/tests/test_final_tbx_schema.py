@@ -1,6 +1,6 @@
 import pytest
 
-from app.assistant.guards import sensitive_request
+from app.assistant.guards import missing_capability, sensitive_request
 from app.data.catalog import DatasetCatalog
 from app.data.query_engine import GroundedQueryEngine
 from app.schemas import QueryFilter, QueryPlan
@@ -64,3 +64,13 @@ def test_utr_requests_are_blocked_before_the_model(question):
 def test_full_account_number_request_is_blocked_but_last4_is_allowed():
     assert sensitive_request("Show the full account number")[1] == "protected_account_number"
     assert sensitive_request("Show the account ending in last 4 digits 2345") is None
+
+
+def test_missing_domain_data_names_the_required_contract():
+    vendor_message, vendor_reason = missing_capability("Which vendor had the highest spend?")
+    assert vendor_reason == "missing_vendor_mapping"
+    assert "transaction-to-vendor mapping" in vendor_message
+
+    ledger_message, ledger_reason = missing_capability("Does double entry reconciliation match?")
+    assert ledger_reason == "missing_ledger_entries"
+    assert "journal_id" in ledger_message

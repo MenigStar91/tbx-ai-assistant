@@ -252,6 +252,11 @@ class AssistantService:
                 message, reason = sensitive
                 return self._refuse(request, message, language, reason)
 
+            capability = guards.missing_capability(request.message)
+            if capability:
+                message, reason = capability
+                return self._refuse(request, message, language, reason)
+
             if guards.FORECAST_RE.search(request.message):
                 return self._refuse(
                     request,

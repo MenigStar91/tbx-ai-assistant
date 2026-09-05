@@ -81,6 +81,19 @@ class MetricsStore:
                           ROUND(AVG(latency_ms)) avg_latency_ms
                      FROM query_log GROUP BY model ORDER BY n DESC"""
             ).fetchall()
+            samples = connection.execute(
+                "SELECT tokens_in + tokens_out total_tokens, latency_ms FROM query_log ORDER BY id"
+            ).fetchall()
+
+        def percentile(values: list[int], fraction: float) -> float:
+            if not values:
+                return 0.0
+            ordered = sorted(values)
+            index = max(0, min(len(ordered) - 1, round((len(ordered) - 1) * fraction)))
+            return float(ordered[index])
+
+        token_samples = [int(item["total_tokens"]) for item in samples]
+        latency_samples = [int(item["latency_ms"]) for item in samples]
         return {
             "queries": row["queries"],
             "refusals": row["refusals"],
@@ -88,6 +101,10 @@ class MetricsStore:
             "avg_tokens_out": round(row["avg_tokens_out"], 1),
             "avg_tokens_total": round(row["avg_tokens_total"], 1),
             "avg_latency_ms": round(row["avg_latency_ms"], 1),
+            "p50_tokens_total": percentile(token_samples, 0.50),
+            "p95_tokens_total": percentile(token_samples, 0.95),
+            "p50_latency_ms": percentile(latency_samples, 0.50),
+            "p95_latency_ms": percentile(latency_samples, 0.95),
             "by_model": [dict(item) for item in by_model],
         }
 
