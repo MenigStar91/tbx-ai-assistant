@@ -362,7 +362,11 @@ class AssistantService:
                 role="system",
                 content="PREVIOUS_VALIDATED_PLAN=" + request.previous_plan.model_dump_json(),
             ))
-        planner_messages.extend(request.history[-12:])
+        # The transcript is deliberately NOT sent. Context is carried by merging
+        # the previous QueryPlan in Python (app/assistant/followups.py), so the
+        # model never has to resolve what "that" referred to and cannot get it
+        # wrong. Replaying history also made the planner sticky: asked to widen
+        # ("and total spent?") it copied the previous bank filter straight back.
         planner_messages.append(Message(role="user", content=request.message))
         planned = await self.provider.generate(planner_messages)
 
