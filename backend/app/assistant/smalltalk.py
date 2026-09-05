@@ -73,6 +73,28 @@ def _capability_reply(datasets: list[str]) -> str:
     )
 
 
+_METRIC_WORDS = re.compile(
+    r"\b(total|sum|count|how|many|much|average|avg|largest|smallest|list|show|break|"
+    r"spend|spent|paid|pay|receiv\w*|balance|unreconciled|reconciled|transactions?|payouts?)\b",
+    re.IGNORECASE,
+)
+
+
+def too_vague(question: str) -> str | None:
+    """A fragment the planner cannot ground, e.g. a half-typed question.
+
+    Guessing at "What i" produced a confident grand total of everything. Asking
+    costs nothing and is the honest response to an incomplete question.
+    """
+    words = re.findall(r"[a-zA-Z]{2,}", question or "")
+    if len(words) >= 3 or _METRIC_WORDS.search(question or ""):
+        return None
+    return (
+        "I did not catch what you are asking. Try naming what you want and over what "
+        "period — for example \"total spend last month\" or \"unreconciled transactions\"."
+    )
+
+
 def conversational_reply(
     question: str,
     datasets: list[str],

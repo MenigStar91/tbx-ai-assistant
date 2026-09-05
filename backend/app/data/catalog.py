@@ -4,6 +4,8 @@ from typing import Any
 
 import duckdb
 
+from app.data.sql_loader import load_sql_directory
+
 
 def safe_name(value: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9_]+", "_", value.strip().lower()).strip("_")
@@ -42,7 +44,14 @@ class DatasetCatalog:
     def connection(self) -> duckdb.DuckDBPyConnection:
         connection = duckdb.connect(":memory:")
         paths = sorted(self.directory.glob("*.csv"))
-        final_schema = {safe_name(path.stem) for path in paths} >= {"bank", "account", "transaction"}
+
+        # TBX ships SQL, not CSV: CREATE TABLE plus INSERT blocks, sometimes
+        # inside a schema document. Loaded under the same _source_ prefix so the
+        # safe views below cover it identically.
+        sql_tables = load_sql_directory(connection, self.directory, prefix="_source_")
+
+        csv_names = {safe_name(path.stem) for path in paths}
+        final_schema = (csv_names | set(sql_tables)) >= {"bank", "account", "transaction"}
         for path in paths:
             view = safe_name(path.stem)
             registered_view = f"_source_{view}" if final_schema else view
@@ -99,7 +108,27 @@ class DatasetCatalog:
                    t.transaction_amount,
                    CAST(t.transaction_reference_id AS VARCHAR) AS transaction_reference_id,
                    (t.utr_number IS NOT NULL AND LENGTH(TRIM(CAST(t.utr_number AS VARCHAR))) > 0)
-                       AS utr_available
+                       AS utr_available,
+                   -- ledger direction: "spend" means debits, and summing
+                   -- transaction_amount would add money in to money out
+                   CASE WHEN LOWER(t.transaction_type) = 'debit'
+                        THEN t.transaction_amount ELSE 0 END AS debit_amount,
+                   CASE WHEN LOWER(t.transaction_type) = 'credit'
+                        THEN t.transaction_amount ELSE 0 END AS credit_amount,
+                   CASE WHEN LOWER(t.transaction_type) = 'debit'
+                        THEN -t.transaction_amount ELSE t.transaction_amount END AS signed_amount,
+                   -- The schema carries no reconciliation column. A transaction
+                   -- with nothing to match against is what an operations team
+                   -- calls unreconciled, so that is the definition used - and the
+                   -- assistant states it whenever it answers such a question.
+                   CASE WHEN t.transaction_reference_id IS NULL
+                             AND (t.utr_number IS NULL OR LENGTH(TRIM(CAST(t.utr_number AS VARCHAR))) = 0)
+                        THEN 'unreconciled'
+                        WHEN t.transaction_reference_id IS NULL
+                             OR t.utr_number IS NULL
+                             OR LENGTH(TRIM(CAST(t.utr_number AS VARCHAR))) = 0
+                        THEN 'partially_reconciled'
+                        ELSE 'reconciled' END AS reconciliation_status
             FROM _source_transaction t
             LEFT JOIN _source_account a ON t.account_id = a.account_id
             LEFT JOIN _source_bank b ON a.bank_code = b.bank_code

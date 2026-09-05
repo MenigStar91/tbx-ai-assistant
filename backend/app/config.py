@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "TBX AI Assistant"
+    app_name: str = "FiFi — Financial Findings"
     environment: str = "development"
     llm_provider: Literal["mock", "keyword", "sarvam", "openai"] = "sarvam"
     # when the configured provider fails, degrade to the mock planner instead of

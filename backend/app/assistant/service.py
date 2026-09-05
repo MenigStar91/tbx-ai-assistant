@@ -9,10 +9,11 @@ from pydantic import ValidationError
 from app.assistant import guards
 from app.assistant.narrate import allowed_numerals, narrate, verify_numbers
 from app.assistant.repair import repair_plan
-from app.assistant.smalltalk import conversational_reply
+from app.assistant.smalltalk import conversational_reply, too_vague
 from app.assistant.followups import merge_follow_up
 from app.data.catalog import DatasetCatalog
 from app.data.exports import export_store
+from app.data.display import RECONCILIATION_DEFINITION
 from app.data.metrics import metrics_store
 from app.data.query_engine import GroundedQueryEngine
 from app.providers.base import LLMProvider
@@ -79,6 +80,7 @@ class AssistantService:
     """
 
     _vocabulary_cache: dict[str, set[str]] = {}
+    _column_values_cache: dict[str, dict[str, set[str]]] = {}
     _bounds_cache: dict[str, tuple[str | None, str | None]] = {}
     _values_cache: dict[str, list[str]] = {}
     _column_bounds_cache: dict[str, dict[str, tuple[str, str]]] = {}
@@ -163,6 +165,19 @@ class AssistantService:
             self._column_bounds_cache[signature] = cached
         return cached
 
+    def _column_values(self, catalog: dict) -> dict[str, set[str]]:
+        """Distinct values per column, for spotting an invented filter."""
+        signature = json.dumps(catalog, sort_keys=True)
+        cached = self._column_values_cache.get(signature)
+        if cached is None:
+            connection = self.catalog.connection()
+            try:
+                cached = guards.build_column_values(catalog, connection)
+            finally:
+                connection.close()
+            self._column_values_cache[signature] = cached
+        return cached
+
     def _anchor(self, catalog: dict) -> tuple[date, str | None, str | None]:
         """The date the planner should treat as 'now'.
 
@@ -242,6 +257,16 @@ class AssistantService:
                     "Show transactions for bank code HDFC",
                     "Break down available balance by bank",
                 ],
+            )
+
+        # with a previous plan in hand a two-word message is a refinement
+        # ("For HDFC?"), not an unanswerable fragment
+        if request.previous_plan is None and (vague := too_vague(request.message)) is not None:
+            metrics_store.record(question=request.message, model="pre-model-guard",
+                                 refused=True, reason="too_vague")
+            return ChatResponse(
+                session_id=request.session_id, answer=vague, confidence="low",
+                clarification_needed=True, refusal_reason="too_vague", language=language,
             )
 
         # ---- deterministic guards, before any model call (zero tokens) --------
@@ -355,8 +380,21 @@ class AssistantService:
         # of repeatable mistakes that are cheaper to correct than to prompt away
         raw_plan, repairs = repair_plan(
             raw_plan, request.message, catalog, self._values(catalog), anchor,
-            self._column_bounds(catalog),
+            self._column_bounds(catalog), self._column_values(catalog),
         )
+
+        # A filter on a value the column does not contain is an invented filter.
+        # Answering "no rows match" would present a bad plan as a real finding.
+        if unresolved := raw_plan.pop("_unresolved", None):
+            column, value, examples = unresolved[0]
+            return self._refuse(
+                request,
+                f'There is no {column} of "{value}" in this data, so I cannot answer that. '
+                f'Values I do have include: {", ".join(examples)}.',
+                language,
+                f"invented_filter:{column}={value}",
+                planned,
+            )
 
         try:
             plan = QueryPlan.model_validate(raw_plan)
@@ -398,6 +436,15 @@ class AssistantService:
 
         # ---- narration: templated from the computed result, no model call ----
         answer = narrate(plan, result.evidence, result.total_matching, language)
+
+        # reconciliation_status is computed from missing reference numbers, not
+        # shipped by TBX - state the definition whenever an answer relies on it
+        uses_reconciliation = bool(plan.group_by and "reconciliation_status" in plan.group_by)
+        uses_reconciliation = uses_reconciliation or any(
+            item.column == "reconciliation_status" for item in (plan.filters or [])
+        )
+        if uses_reconciliation and not guards.is_indic(language):
+            answer = f"{answer} {RECONCILIATION_DEFINITION}"
 
         # tripwire: no numeral may appear in the answer that we did not compute
         verified, orphans = verify_numbers(

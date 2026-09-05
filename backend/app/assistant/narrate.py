@@ -93,6 +93,18 @@ def narrate(plan: QueryPlan, evidence: Evidence, total_matching: int, language: 
         )
 
     result = evidence.rows[0].get("result") if evidence.rows else None
+    # "spend at Kotak" over an account whose only transaction is a credit is a
+    # true zero, but a bare 0.00 reads like a failure. Say why it is zero.
+    if plan.measure in {"debit_amount", "credit_amount"} and result is not None \
+            and float(result) == 0 and total_matching > 0 and not hindi:
+        direction = "money going out" if plan.measure == "debit_amount" else "money coming in"
+        other = "credits" if plan.measure == "debit_amount" else "debits"
+        return (
+            f"Zero{_filter_phrase(plan)}. {total_matching} transaction"
+            f"{'s' if total_matching != 1 else ''} matched, but none of them are "
+            f"{direction} - they are all {other}."
+        )
+
     word = _OPERATION_WORD.get(plan.operation, plan.operation)
     measure = f" of {plan.measure}" if plan.measure else ""
     if hindi:

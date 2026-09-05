@@ -42,6 +42,11 @@ QUERY_LEXICON: set[str] = set(
     now same about instead
     run ran within including excluding also then than data dataset row rows
     inr rupees rupee crore lakh lakhs usd gst gstin tds utr
+    receive received receives receiving receipt receipts credit credits debit debits
+    inflow inflows outflow outflows deposit deposits withdrawal withdrawals balance balances
+    bank banks branch entity entities program ledger ifsc reference incoming outgoing
+    about instead rather versus vs compared comparison same again another next then
+    above below previous earlier former latter one ones here there mentioned shown
     bank banks debit debits credit credits balance balances available program entity
     reference references id ids identifier identifiers last digits four raw masked
     january february march april may june july august september october november december
@@ -208,7 +213,14 @@ def unsupported_subject(question: str, data_vocabulary: set[str]) -> list[str]:
     vendor resolved perfectly well.
     """
     known = QUERY_LEXICON | data_vocabulary | COMPANY_SUFFIXES
-    words = re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", question.lower())
+    # split on hyphens and slashes: "may-june" is two ordinary words, and
+    # treating it as one unknown token refuses a perfectly clear date range
+    words = [
+        part
+        for token in re.findall(r"[a-zA-Z][a-zA-Z'\-/]{2,}", question.lower())
+        for part in re.split(r"[-/]", token)
+        if len(part) >= 3
+    ]
     unknown = [
         word
         for word in words
@@ -233,7 +245,8 @@ def unresolved_entity(question: str, data_vocabulary: set[str]) -> str | None:
     for phrase in re.findall(r"\b[A-Z][a-zA-Z&.'-]+(?:\s+[A-Z][a-zA-Z&.'-]+)*", question):
         words = [
             word
-            for word in phrase.split()
+            for chunk in phrase.split()
+            for word in re.split(r"[-/]", chunk)
             # a capitalised word that is ordinary query language ("Break down...",
             # "Show me...") is capitalised by grammar, not because it names a thing
             if word.lower() not in QUERY_LEXICON
@@ -267,7 +280,8 @@ COMPANY_SUFFIXES = {
     "pvt", "private", "technologies", "tech", "systems", "enterprises", "and", "the",
 }
 
-MATCH_FLOOR = 0.70     # below this the name simply is not in the data; a 0.6
+MATCH_FLOOR = 0.78     # below this the name simply is not in the data; a 0.7
+                       # score between "ebitda" and "debit" is noise, not a hint
                        # match is noise, not a 'did you mean'
 MATCH_CONFIRM = 0.86   # above this, accept it
 
@@ -317,6 +331,41 @@ ENTITY_CUE_RE = re.compile(
     r"\b(to|from|for|with|pay|paid|pays|billed|vendor|supplier|counterparty|called|named)\s*$",
     re.IGNORECASE,
 )
+
+
+def build_column_values(catalog: dict[str, list[dict[str, str]]], connection) -> dict[str, set[str]]:
+    """Distinct values per "table.column", for low-cardinality text columns only.
+
+    Used to tell an invented filter value from a real one. A filter on a value
+    the column does not contain returns zero rows, and a confident empty result
+    reads to a user exactly like an answer.
+    """
+    index: dict[str, set[str]] = {}
+    for dataset, columns in catalog.items():
+        for column in columns:
+            if "CHAR" not in column["type"].upper() and "STRING" not in column["type"].upper():
+                continue
+            name = column["name"]
+            try:
+                distinct = connection.execute(
+                    f'SELECT COUNT(DISTINCT "{name}") FROM "{dataset}"'
+                ).fetchone()[0]
+                if not distinct or distinct > MAX_DISTINCT:
+                    continue
+                # original casing is kept: it is what gets written back into a
+                # filter, and "hdfc bank limited" is not the stored value
+                values = {
+                    str(v[0]).strip()
+                    for v in connection.execute(
+                        f'SELECT DISTINCT "{name}" FROM "{dataset}" '
+                        f'WHERE "{name}" IS NOT NULL LIMIT {MAX_DISTINCT}'
+                    ).fetchall()
+                }
+                if values:
+                    index[f"{dataset}.{name}"] = values
+            except Exception:  # noqa: BLE001
+                continue
+    return index
 
 
 def candidate_entities(question: str) -> list[str]:

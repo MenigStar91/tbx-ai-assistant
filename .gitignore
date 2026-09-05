@@ -17,3 +17,7 @@ data/uploads/*
 data/generated/
 data/runtime/
 *.duckdb
+
+# runtime state, never data
+**/data/runtime/
+*.db

@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.data.catalog import DatasetCatalog
+from app.data.display import PREFERRED_DISPLAY_COLUMNS
 from app.schemas import Evidence, QueryPlan
 
 
@@ -97,7 +98,10 @@ class GroundedQueryEngine:
 
         quoted_groups = [f'"{column}"' for column in plan.group_by]
         if plan.operation == "list":
-            select = "*"
+            # a wide joined view is unreadable as a full row dump; show the
+            # columns a person reads, and keep the rest in the CSV export
+            preferred = [c for c in PREFERRED_DISPLAY_COLUMNS.get(plan.dataset, []) if c in columns]
+            select = ", ".join(f'"{c}"' for c in preferred) if preferred else "*"
         else:
             expression = self.OPERATIONS[plan.operation]
             if "{measure}" in expression:
@@ -117,6 +121,9 @@ class GroundedQueryEngine:
         sql = f'SELECT {select} FROM "{plan.dataset}"{where}'
         if quoted_groups and plan.operation != "list":
             sql += " GROUP BY " + ", ".join(quoted_groups)
+            # the narration calls out the largest groups, so the rows must be
+            # ordered - otherwise "Largest:" names whichever rows came back first
+            sql += " ORDER BY result DESC NULLS LAST"
 
         # A LIMIT belongs on a row listing, never on an aggregate: truncating
         # groups silently changes the answer. Aggregates are already one row per

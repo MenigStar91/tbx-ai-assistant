@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import calendar
 import re
+from difflib import SequenceMatcher
 from datetime import date, timedelta
 
 # words that mean the user actually asked for a breakdown
+SPEND_RE = re.compile(r"\b(spend|spent|spending|paid|pay|pays|payment|payments|outflow|debit|debits|outgoing)\b", re.IGNORECASE)
+RECEIVED_RE = re.compile(r"\b(receiv\w*|credit|credits|inflow|incoming|deposit\w*)\b", re.IGNORECASE)
+
 NEGATION_RE = re.compile(
     r"\b(not|isn'?t|aren'?t|wasn'?t|weren'?t|except|excluding|other\s+than|apart\s+from|"
     r"besides|non|without|didn'?t|no\s+longer|unmatched|outstanding)\b",
@@ -101,12 +105,34 @@ def resolve_period(question: str, anchor: date) -> tuple[date, date, str] | None
         _, end = _month_window(year, first + 2)
         return start, end, f"Q{quarter} {year}"
 
+    # every month named in the question, in the order they appear. "may" only
+    # counts as a month when the surrounding words make it one, so the modal
+    # verb ("we may spend") is not read as a date.
+    named: list[tuple[int, int]] = []
     for name, index in MONTHS.items():
-        if len(name) > 3 and re.search(rf"\b{name}\b", q):
-            year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
-            year = int(year_match.group(1)) if year_match else anchor.year
-            start, end = _month_window(year, index)
-            return start, end, f"{name.title()} {year}"
+        if len(name) <= 3 and name != "may":
+            continue
+        for match in re.finditer(rf"\b{name}\b", q):
+            if name == "may":
+                before = q[max(0, match.start() - 12):match.start()]
+                after = q[match.end():match.end() + 8]
+                if not re.search(r"\b(in|of|during|for|and|since|from|until|to)\s*$", before) \
+                        and not re.search(r"^\s*(\d{4}|and|to|-)", after):
+                    continue
+            named.append((match.start(), index))
+    if named:
+        named.sort()
+        year_match = re.search(r"\b((?:19|20)\d{2})\b", q)
+        year = int(year_match.group(1)) if year_match else anchor.year
+        first_month, last_month = named[0][1], named[-1][1]
+        start, _ = _month_window(year, first_month)
+        _, end = _month_window(year, last_month)
+        if start > end:                       # "December and January" wraps
+            start, _ = _month_window(year, last_month)
+            _, end = _month_window(year, first_month)
+        label = (f"{calendar.month_name[first_month]} {year}" if first_month == last_month
+                 else f"{calendar.month_name[first_month]}-{calendar.month_name[last_month]} {year}")
+        return start, end, label
 
     if match := re.search(r"\b((?:19|20)\d{2})\b", q):
         year = int(match.group(1))
@@ -122,6 +148,7 @@ def repair_plan(
     values: list[str] | None = None,
     anchor: date | None = None,
     column_bounds: dict[str, tuple[str, str]] | None = None,
+    column_values: dict[str, set[str]] | None = None,
 ) -> tuple[dict, list[str]]:
     """Return the corrected plan and a list of the repairs applied.
 
@@ -148,6 +175,44 @@ def repair_plan(
             inferred = "list"
         repairs.append(f"inferred operation={inferred} (the planner omitted it)")
         plan["operation"] = inferred
+
+    # ---- 0b. resolve a table name that does not exist -------------------------
+    # The planner says "transactions"; the table is "transaction_full". A near
+    # miss on a table name is recoverable and should not fail the whole query.
+    if plan.get("dataset") not in catalog and catalog:
+        wanted = str(plan.get("dataset") or "").lower().rstrip("s")
+        best, best_score = None, 0.0
+        for name in catalog:
+            base = name.lower()
+            if base.startswith(wanted) or base.rstrip("s").startswith(wanted) or wanted in base:
+                score = 0.95
+            else:
+                score = SequenceMatcher(None, wanted, base).ratio()
+            if score > best_score:
+                best, best_score = name, score
+        if best and best_score >= 0.6:
+            repairs.append(f'resolved table {plan.get("dataset")} -> {best}')
+            plan["dataset"] = best
+
+    # ---- 0c. the chosen table cannot answer this plan -------------------------
+    # observed: "how much did we spend at HDFC BANK LIMITED" planned against
+    # account_full with measure credit_amount, a column only transaction_full has.
+    chosen = catalog.get(plan.get("dataset")) or []
+    if chosen:
+        chosen_columns = {c["name"] for c in chosen}
+        needed = {f.get("column") for f in (plan.get("filters") or []) if f.get("column")}
+        needed |= {g for g in (plan.get("group_by") or []) if g}
+        if plan.get("operation") not in {"count", "list"} and plan.get("measure"):
+            needed.add(plan["measure"])
+        if needed - chosen_columns:
+            fits = [name for name, cols in catalog.items()
+                    if needed <= {c["name"] for c in cols}]
+            if len(fits) == 1 and fits[0] != plan.get("dataset"):
+                repairs.append(
+                    f'moved to {fits[0]}: {plan.get("dataset")} has no '
+                    f'{", ".join(sorted(needed - chosen_columns))}'
+                )
+                plan["dataset"] = fits[0]
 
     # ---- 1. drop a grouping the question never asked for --------------------
     if plan.get("group_by") and not BREAKDOWN_RE.search(question):
@@ -183,12 +248,83 @@ def repair_plan(
             if any(token in column["type"].upper() for token in ("INT", "DOUBLE", "DECIMAL", "FLOAT", "BIGINT"))
         ]
         preferred = next(
-            (name for name in ("transaction_amount", "available_balance", "amount", "amount_paise", "value", "total") if name in numeric),
+            (name for name in ("transaction_amount", "available_balance", "amount",
+                               "amount_paise", "value", "total") if name in numeric),
             numeric[0] if len(numeric) == 1 else None,
         )
         if preferred:
             repairs.append(f"set measure={preferred} (required by {plan['operation']})")
             plan["measure"] = preferred
+
+    # ---- 4a. repair column names the planner invented -----------------------
+    # observed: a sub-1B planner emits "dataset.date" instead of
+    # "transaction_date". A qualified prefix or a near-miss name is recoverable;
+    # anything else is left alone so validation refuses rather than guessing.
+    real_columns = [c["name"] for c in catalog.get(plan.get("dataset")) or []]
+    if real_columns:
+        def fix_column(name: str) -> str | None:
+            if not name or name in real_columns:
+                return None
+            bare = name.split(".")[-1]
+            if bare in real_columns:
+                return bare
+            scored = sorted(
+                ((SequenceMatcher(None, bare.lower(), c.lower()).ratio(), c) for c in real_columns),
+                reverse=True,
+            )
+            best_score, best = scored[0]
+            # a suffix match ("date" -> "transaction_date") is a strong signal
+            if best_score >= 0.62 or any(
+                c.lower().endswith("_" + bare.lower()) or c.lower().startswith(bare.lower() + "_")
+                for c in real_columns
+            ):
+                exact = next(
+                    (c for c in real_columns
+                     if c.lower().endswith("_" + bare.lower()) or c.lower().startswith(bare.lower() + "_")),
+                    None,
+                )
+                return exact or best
+            return None
+
+        for item in plan.get("filters") or []:
+            if fixed := fix_column(item.get("column", "")):
+                repairs.append(f'corrected column {item["column"]} -> {fixed}')
+                item["column"] = fixed
+        plan["group_by"] = [fix_column(g) or g for g in (plan.get("group_by") or [])]
+        if plan.get("measure") and (fixed := fix_column(plan["measure"])):
+            repairs.append(f'corrected measure {plan["measure"]} -> {fixed}')
+            plan["measure"] = fixed
+
+        # a measure that still is not a real column: fall back to the obvious
+        # numeric column rather than failing the whole query
+        if plan.get("operation") in {"sum", "average", "minimum", "maximum"} and plan.get("measure") not in real_columns:
+            numeric = [
+                c["name"] for c in catalog[plan["dataset"]]
+                if any(t in c["type"].upper() for t in ("INT", "DOUBLE", "DECIMAL", "FLOAT"))
+            ]
+            preferred = next(
+                    (n for n in ("transaction_amount", "available_balance", "amount",
+                                 "amount_paise", "value", "total") if n in numeric),
+                    None,
+                )
+            if preferred:
+                repairs.append(f'measure {plan.get("measure")!r} is not a column here; used {preferred}')
+                plan["measure"] = preferred
+
+    # ---- 4a2. ledger direction -----------------------------------------------
+    # "how much did we spend" over a bank ledger means debits, not every row.
+    # Summing transaction_amount would add money in to money out.
+    if real_columns and plan.get("operation") in {"sum", "average", "maximum", "minimum"}:
+        wants_spend = bool(SPEND_RE.search(question))
+        wants_received = bool(RECEIVED_RE.search(question))
+        if wants_spend and not wants_received and "debit_amount" in real_columns \
+                and plan.get("measure") in {"transaction_amount", "amount", "signed_amount", "credit_amount"}:
+            repairs.append(f'used debit_amount instead of {plan["measure"]} (the question asks about money going out)')
+            plan["measure"] = "debit_amount"
+        elif wants_received and not wants_spend and "credit_amount" in real_columns \
+                and plan.get("measure") in {"transaction_amount", "amount", "signed_amount", "debit_amount"}:
+            repairs.append(f'used credit_amount instead of {plan["measure"]} (the question asks about money coming in)')
+            plan["measure"] = "credit_amount"
 
     # ---- 4b. a negated filter needs a negation in the question ---------------
     # observed: "how many vendor payouts failed" planned status neq failed, which
@@ -244,18 +380,43 @@ def repair_plan(
     # The guards may have resolved "CloudScale Corp" to "CloudScale Systems", but
     # the model still emits the user's literal phrase. Filtering on it matches
     # nothing and produces a confident empty result, which reads as an answer.
-    if values:
+    if values or column_values:
         from app.assistant.guards import resolve_entity
 
         fixed = []
         for item in plan.get("filters") or []:
             value = item.get("value")
             if isinstance(value, str) and len(value) > 2 and item.get("operator") == "eq":
-                verdict, best, _, _ = resolve_entity(value, values)
-                if verdict in {"exact", "confident"} and best and best != value:
+                # resolve against THIS column's values, not every value in the
+                # database: "HDFC" is an exact bank_code but only a prefix of the
+                # bank_name "HDFC BANK LIMITED", and the filter is on bank_name
+                key = f"{plan.get('dataset')}.{item.get('column')}"
+                scope = sorted(column_values.get(key, set())) if column_values else []
+                verdict, best, _, _ = resolve_entity(value, scope or (values or []))
+                if verdict in {"exact", "confident"} and best and best.lower() != value.lower():
                     repairs.append(f'resolved "{value}" to "{best}"')
                     item = {**item, "value": best}
             fixed.append(item)
         plan["filters"] = fixed
+
+    # ---- 6. an eq filter on a value the column does not contain ---------------
+    # (runs after canonicalisation, so a resolvable near-miss is already fixed)
+    # "whcih all?" planned account_number eq 'all'; "which bank?" planned
+    # bank_code eq '12345'. Both return zero rows, and a confident empty result
+    # is indistinguishable from an answer. Flag them so the caller can refuse.
+    if column_values:
+        unresolved = []
+        for item in plan.get("filters") or []:
+            if item.get("operator") != "eq":
+                continue
+            key = f"{plan.get('dataset')}.{item.get('column')}"
+            known = column_values.get(key)
+            if not known:
+                continue
+            lowered = {str(k).strip().lower() for k in known}
+            if str(item.get("value", "")).strip().lower() not in lowered:
+                unresolved.append((item.get("column"), item.get("value"), sorted(known)[:5]))
+        if unresolved:
+            plan["_unresolved"] = unresolved
 
     return plan, repairs
