@@ -26,7 +26,7 @@ vendor-payout fixture and is not comparable to the final schema. The executable
 source of truth is `evals/questions.json`; generate a result with:
 
 ```bash
-python evals/run.py --provider openai --data data/sample --md > EVAL.md
+python evals/run.py --provider openai --dataset-label local-mysql --md > EVAL.md
 ```
 
 Run at least three times per candidate model and report median accuracy, tokens
