@@ -38,6 +38,7 @@ def test_row_count_is_the_true_match_count_not_the_page_size(tmp_path):
     assert result.evidence.returned_rows == 5
     assert result.evidence.total_rows == 12
     assert result.total_matching == 12
+    assert result.evidence.sql.endswith("LIMIT 5")
 
 
 def test_aggregates_are_never_truncated_by_the_limit(tmp_path):

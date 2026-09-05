@@ -241,9 +241,9 @@ class MySQLDatasetCatalog:
         sql = (
             f'SELECT DISTINCT "{column}" FROM "{dataset}" '
             f'WHERE LOWER(CAST("{column}" AS VARCHAR)) LIKE LOWER(?) '
-            f'ORDER BY "{column}" LIMIT ?'
+            f'ORDER BY "{column}" LIMIT {limit + 1}'
         )
-        parameters = [query.strip() + "%", limit + 1]
+        parameters = [query.strip() + "%"]
         try:
             connection.validate_cost(sql, parameters)
             rows = connection.execute(sql, parameters).fetchall()
