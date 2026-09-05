@@ -2,6 +2,8 @@
 
 An AI assistant for asking plain-language questions about financial operations data and receiving accurate, traceable answers. Built for the **TBX - BVP Tech Catalyst Hackathon**.
 
+For the complete component breakdown, request flow, design rationale, tradeoffs, security analysis and prioritized limitations, read [Architecture Deep Dive](docs/ARCHITECTURE.md).
+
 > **Dataset status:** TBX will provide the starter dataset when teams meet. No private or invented sample data is committed here. The ingestion layer discovers CSV names and columns at runtime, so the provided files can be added without redesigning the application.
 
 ## What the starter already supports
