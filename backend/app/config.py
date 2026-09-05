@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     data_directory: str = "data/uploads"
     max_result_rows: int = 200
+    conversation_db_path: str = "data/runtime/conversations.db"
 
     # uvicorn is usually launched from backend/, but .env lives at the repo
     # root - look in both so the same file works from either directory
