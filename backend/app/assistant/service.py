@@ -10,6 +10,7 @@ from app.assistant import guards
 from app.assistant.narrate import allowed_numerals, narrate, verify_numbers
 from app.assistant.repair import repair_plan
 from app.assistant.smalltalk import conversational_reply
+from app.assistant.followups import merge_follow_up
 from app.data.catalog import DatasetCatalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
@@ -326,6 +327,11 @@ class AssistantService:
             .replace("__LAST_MONTH_END__", last_month_end.isoformat())
         )
         planner_messages = [Message(role="system", content=planner_prompt)]
+        if request.previous_plan:
+            planner_messages.append(Message(
+                role="system",
+                content="PREVIOUS_VALIDATED_PLAN=" + request.previous_plan.model_dump_json(),
+            ))
         planner_messages.extend(request.history[-12:])
         planner_messages.append(Message(role="user", content=request.message))
         planned = await self.provider.generate(planner_messages)
@@ -354,6 +360,8 @@ class AssistantService:
 
         try:
             plan = QueryPlan.model_validate(raw_plan)
+            plan, follow_up_repairs = merge_follow_up(plan, request.previous_plan, request.message)
+            repairs.extend(follow_up_repairs)
             result = GroundedQueryEngine(self.catalog).execute(plan)
         except (ValidationError, ValueError, duckdb.Error) as exc:
             # a raw pydantic traceback is not an answer; say what went wrong plainly
@@ -422,4 +430,5 @@ class AssistantService:
                 "total_ms": int((time.monotonic() - started) * 1000),
                 "model_calls": 1,
             },
+            query_plan=plan,
         )
