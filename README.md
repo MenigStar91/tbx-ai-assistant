@@ -161,6 +161,25 @@ safe columns, and raw evidence or grouped output is capped by `MAX_RESULT_ROWS`.
 For a controlled performance run—not normal requests—set
 `MYSQL_EXPLAIN_ANALYZE=true`; remember that MySQL then executes the explained query.
 
+The assistant, schema catalog and model HTTP client are process-scoped and reused.
+Schema metadata and successful cost estimates are cached; production row values are
+not eagerly copied into memory. A non-grouped aggregate returns its source-row count
+in the same MySQL statement, while grouped answers retain the separate deterministic
+reconciliation query required for accuracy.
+
+For a single-request latency breakdown, inspect the response `usage` object:
+
+```bash
+curl -s http://localhost:8000/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"How much was debited last month?"}' \
+  | jq '.usage | {pre_model_ms, planning_ms, database_ms, total_ms}'
+```
+
+Run the same warmed query several times before changing indexes. If `planning_ms`
+dominates, tune or replace the model; if `database_ms` dominates, capture
+`EXPLAIN ANALYZE` in a controlled test and tune the relevant covering index.
+
 ## Sample questions for the final submission
 
 These are acceptance-test prompts from the stated scope. Actual answers must be captured only after running them against the official dataset.

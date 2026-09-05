@@ -6,9 +6,7 @@ from functools import lru_cache
 
 from app.assistant.service import AssistantService
 from app.config import get_settings
-from app.data.catalog import DatasetCatalog
-from app.data.source_factory import create_catalog
-from app.data.factory import get_dataset_catalog
+from app.data.factory import create_dataset_catalog, get_dataset_catalog
 from app.data.exports import export_store
 from app.data.metrics import metrics_store
 from app.data.conversations import ConversationStore
@@ -25,9 +23,10 @@ def get_conversation_store() -> ConversationStore:
     return ConversationStore(settings.conversation_db_path)
 
 
+@lru_cache
 def get_assistant_service() -> AssistantService:
     settings = get_settings()
-    return AssistantService(create_provider(settings), ToolRegistry(), create_catalog(settings))
+    return AssistantService(create_provider(settings), ToolRegistry(), get_dataset_catalog())
 
 
 @router.get("/health")
@@ -92,7 +91,7 @@ async def metrics() -> dict:
 
 @router.get("/datasets")
 async def datasets() -> dict:
-    return {"datasets": create_catalog(get_settings()).describe()}
+    return {"datasets": get_dataset_catalog().describe()}
 
 
 @router.get("/datasets/{dataset}/values")
@@ -117,14 +116,16 @@ async def refresh_datasets() -> dict:
 
 @router.post("/datasets/upload")
 async def upload_datasets(files: list[UploadFile] = File(...)) -> dict:
-    catalog = create_catalog(get_settings())
+    # Upload is a local-demo operation. Chat never receives these write
+    # credentials and always uses the cached read-only catalog.
+    catalog = create_dataset_catalog(get_settings(), write=True)
     saved = []
     for upload in files:
         try:
             saved.append(catalog.import_csv(upload.filename or "dataset.csv", await upload.read()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"uploaded": saved, "catalog": catalog.describe()}
+    return {"uploaded": saved, "catalog": get_dataset_catalog().refresh()}
 
 
 @router.get("/exports/{export_id}.csv")

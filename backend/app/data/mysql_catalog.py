@@ -48,10 +48,19 @@ class CursorAdapter:
 class MySQLConnectionAdapter:
     """Small execute-style wrapper used by the existing grounded engine."""
 
-    def __init__(self, connection, max_query_cost: float, explain_analyze: bool):
+    def __init__(
+        self,
+        connection,
+        max_query_cost: float,
+        explain_analyze: bool,
+        cost_cache: dict[tuple[str, tuple[str, ...]], float | None],
+        cache_lock: RLock,
+    ):
         self.raw = connection
         self.max_query_cost = max_query_cost
         self.explain_analyze = explain_analyze
+        self.cost_cache = cost_cache
+        self.cache_lock = cache_lock
 
     @staticmethod
     def _mysql_sql(sql: str) -> str:
@@ -93,6 +102,11 @@ class MySQLConnectionAdapter:
 
     def validate_cost(self, sql: str, parameters: list[Any]) -> float | None:
         mysql_sql = self._mysql_sql(sql)
+        cache_key = (mysql_sql, tuple(str(value) for value in parameters))
+        if not self.explain_analyze:
+            with self.cache_lock:
+                if cache_key in self.cost_cache:
+                    return self.cost_cache[cache_key]
         cursor = self.raw.cursor()
         try:
             cursor.execute("EXPLAIN FORMAT=JSON " + mysql_sql, tuple(parameters))
@@ -105,6 +119,11 @@ class MySQLConnectionAdapter:
             if self.explain_analyze:
                 cursor.execute("EXPLAIN ANALYZE " + mysql_sql, tuple(parameters))
                 cursor.fetchall()
+            else:
+                with self.cache_lock:
+                    if len(self.cost_cache) >= 256:
+                        self.cost_cache.pop(next(iter(self.cost_cache)))
+                    self.cost_cache[cache_key] = cost
             return cost
         except mysql.connector.Error as exc:
             raise DatabaseQueryError("MySQL could not explain the validated query") from exc
@@ -154,6 +173,7 @@ class MySQLDatasetCatalog:
         self.require_time_filter_tables = require_time_filter_tables or set()
         self.upload_directory.mkdir(parents=True, exist_ok=True)
         self._catalog_cache: dict[str, list[dict[str, str]]] | None = None
+        self._cost_cache: dict[tuple[str, tuple[str, ...]], float | None] = {}
         self._lock = RLock()
 
     def _raw_connection(self):
@@ -168,7 +188,11 @@ class MySQLDatasetCatalog:
 
     def connection(self) -> MySQLConnectionAdapter:
         return MySQLConnectionAdapter(
-            self._raw_connection(), self.max_query_cost, self.explain_analyze
+            self._raw_connection(),
+            self.max_query_cost,
+            self.explain_analyze,
+            self._cost_cache,
+            self._lock,
         )
 
     def validate_plan(self, plan) -> None:
@@ -220,6 +244,14 @@ class MySQLDatasetCatalog:
         """Avoid unbounded DISTINCT scans; filters are verified by MySQL."""
         return []
 
+    def column_values(self) -> dict[str, set[str]]:
+        """Avoid eagerly materialising distinct values from high-row tables.
+
+        Dimension values are resolved only when a plan actually filters one,
+        through the bounded prefix-search path below.
+        """
+        return {}
+
     def search_values(
         self, dataset: str, column: str, query: str, limit: int = 8
     ) -> tuple[list[str], bool]:
@@ -240,7 +272,7 @@ class MySQLDatasetCatalog:
         connection = self.connection()
         sql = (
             f'SELECT DISTINCT "{column}" FROM "{dataset}" '
-            f'WHERE LOWER(CAST("{column}" AS VARCHAR)) LIKE LOWER(?) '
+            f'WHERE "{column}" LIKE ? '
             f'ORDER BY "{column}" LIMIT {limit + 1}'
         )
         parameters = [query.strip() + "%"]

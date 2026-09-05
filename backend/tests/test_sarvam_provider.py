@@ -21,10 +21,7 @@ class FakeClient:
         self.body = body
         self.payload = None
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
+    async def aclose(self):
         return None
 
     async def post(self, _path, json, headers):

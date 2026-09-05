@@ -11,6 +11,20 @@ class SarvamProvider:
         if not settings.sarvam_api_key:
             raise ValueError("SARVAM_API_KEY is required when LLM_PROVIDER=sarvam")
         self.settings = settings
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.settings.sarvam_base_url,
+                timeout=self.settings.request_timeout_seconds,
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def generate(self, messages: list[Message]) -> ProviderResponse:
         payload = {
@@ -30,15 +44,12 @@ class SarvamProvider:
             "api-subscription-key": self.settings.sarvam_api_key,
             "content-type": "application/json",
         }
-        async with httpx.AsyncClient(
-            base_url=self.settings.sarvam_base_url,
-            timeout=self.settings.request_timeout_seconds,
-        ) as client:
-            started = time.monotonic()
-            response = await client.post("/chat/completions", json=payload, headers=headers)
-            response.raise_for_status()
-            body = response.json()
-            latency_ms = int((time.monotonic() - started) * 1000)
+        client = self._http_client()
+        started = time.monotonic()
+        response = await client.post("/chat/completions", json=payload, headers=headers)
+        response.raise_for_status()
+        body = response.json()
+        latency_ms = int((time.monotonic() - started) * 1000)
         usage = body.get("usage") or {}
         choice = body["choices"][0]
         content = (choice.get("message") or {}).get("content")

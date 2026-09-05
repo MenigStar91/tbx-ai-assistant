@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 from app.data.catalog import DatasetCatalog
-from app.data.display import PREFERRED_DISPLAY_COLUMNS
 from app.data.projections import from_clause
 from app.schemas import Evidence, QueryPlan
 
@@ -107,15 +106,19 @@ class GroundedQueryEngine:
 
         quoted_groups = [f'"{column}"' for column in plan.group_by]
         if plan.operation == "list":
-            # a wide joined view is unreadable as a full row dump; show the
-            # columns a person reads, and keep the rest in the CSV export
-            preferred = [c for c in PREFERRED_DISPLAY_COLUMNS.get(plan.dataset, []) if c in columns]
-            select = ", ".join(f'"{c}"' for c in preferred) if preferred else "*"
+            # The planner is allowlisted and capped above. Honour its narrow
+            # projection instead of reading every preferred column.
+            select = ", ".join(f'"{column}"' for column in plan.select)
         else:
             expression = self.OPERATIONS[plan.operation]
             if "{measure}" in expression:
                 expression = expression.format(measure=f'"{plan.measure}"')
             select = ", ".join(quoted_groups + [f"{expression} AS result"])
+            # A single aggregate can return its source row count in the same
+            # scan. This removes the separate COUNT(*) query from the common
+            # finance-total path.
+            if not quoted_groups and plan.operation != "count":
+                select += ', COUNT(*) AS "__total_matching"'
 
         clauses: list[str] = []
         parameters: list[Any] = []
@@ -154,17 +157,25 @@ class GroundedQueryEngine:
             sql += f" LIMIT {max_rows + 1}"
 
         connection = self.catalog.connection()
-
-        # The true number of rows the filters match, independent of any limit.
-        # Reporting len(rows) here is how "which transactions are unreconciled?"
-        # silently answers 50 when the real answer is 500.
-        total_matching = connection.execute(
-            f"SELECT COUNT(*) FROM {source}{where}", parameters
-        ).fetchone()[0]
-
+        validate_cost = getattr(connection, "validate_cost", None)
+        if callable(validate_cost):
+            validate_cost(sql, query_parameters)
         cursor = connection.execute(sql, query_parameters)
         names = [item[0] for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
+        if not quoted_groups and plan.operation == "count":
+            total_matching = int(rows[0]["result"] or 0)
+        elif not quoted_groups and plan.operation != "list":
+            total_matching = int(rows[0].pop("__total_matching") or 0)
+            names.remove("__total_matching")
+        else:
+            # Listings and grouped answers still need the exact number of
+            # matching source rows, independent of pagination/group count.
+            count_sql = f"SELECT COUNT(*) FROM {source}{where}"
+            if callable(validate_cost):
+                validate_cost(count_sql, parameters)
+            total_matching = connection.execute(count_sql, parameters).fetchone()[0]
 
         # run the reconciliation check while the connection is still open
         # An empty result caused by the direction filter is true but unhelpful:

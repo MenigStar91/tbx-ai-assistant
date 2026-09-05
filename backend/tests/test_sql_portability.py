@@ -52,7 +52,10 @@ def test_filtered_sql_is_portable(engine):
 
 
 def test_listing_sql_is_portable(engine):
-    sql = _sql(engine, QueryPlan(dataset="transaction", operation="list", limit=5))
+    sql = _sql(engine, QueryPlan(
+        dataset="transaction", operation="list",
+        select=["transaction_date", "transaction_amount"], limit=5,
+    ))
     assert portability_problems(sql) == [], sql
 
 
