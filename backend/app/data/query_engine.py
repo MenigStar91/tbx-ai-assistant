@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from app.data.catalog import DatasetCatalog
+from app.data.base import DatasetCatalogProtocol
 from app.schemas import Evidence, QueryPlan
 
 
@@ -29,7 +29,7 @@ class GroundedQueryEngine:
     }
     FILTERS = {"eq": "=", "neq": "<>", "gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
 
-    def __init__(self, catalog: DatasetCatalog):
+    def __init__(self, catalog: DatasetCatalogProtocol):
         self.catalog = catalog
 
     # operations where the parts genuinely compose back into the whole.
@@ -97,7 +97,9 @@ class GroundedQueryEngine:
 
         quoted_groups = [f'"{column}"' for column in plan.group_by]
         if plan.operation == "list":
-            select = "*"
+            # Explicit projection is essential for an introspected database:
+            # columns excluded by the privacy catalog must not reappear through *.
+            select = ", ".join(f'"{column}"' for column in sorted(columns))
         else:
             expression = self.OPERATIONS[plan.operation]
             if "{measure}" in expression:
@@ -165,4 +167,3 @@ class GroundedQueryEngine:
             export_id=str(uuid4()),
         )
         return QueryResult(evidence=evidence, csv_content=output.getvalue(), total_matching=total_matching)
-
