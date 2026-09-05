@@ -55,20 +55,30 @@ FORECAST_RE = re.compile(
 )
 
 
-def missing_capability(question: str) -> tuple[str, str] | None:
+def missing_capability(question: str, catalog: dict | None = None) -> tuple[str, str] | None:
     """Explain domain questions the published schema cannot prove.
 
     These are not generic out-of-scope refusals: they state the minimum data
     contract (and access) that would make the question answerable.
     """
-    if re.search(r"\b(vendor|supplier|merchant|counterparty)s?\b", question, re.IGNORECASE):
+    available_columns = {
+        column["name"].lower()
+        for columns in (catalog or {}).values()
+        for column in columns
+    }
+    has_vendor_mapping = any(
+        any(term in column for term in ("vendor", "supplier", "merchant", "counterparty"))
+        for column in available_columns
+    )
+    if re.search(r"\b(vendor|supplier|merchant|counterparty)s?\b", question, re.IGNORECASE) and not has_vendor_mapping:
         return (
             "I cannot calculate vendor spend from the current TBX schema because transactions "
             "have no vendor identifier. I need read access to a vendor master plus a "
             "transaction-to-vendor mapping (vendor_id, vendor_name/category, transaction_id).",
             "missing_vendor_mapping",
         )
-    if re.search(r"\b(recon(?:cile|ciliation)?|double[- ]entry|journal|ledger|trial balance)\b", question, re.IGNORECASE):
+    has_ledger = {"debit_amount", "credit_amount"} <= available_columns
+    if re.search(r"\b(recon(?:cile|ciliation)?|double[- ]entry|journal|ledger|trial balance)\b", question, re.IGNORECASE) and not has_ledger:
         return (
             "I cannot prove double-entry reconciliation from bank transactions alone. I need "
             "read access to immutable journal lines containing journal_id, posting_batch_id, "
