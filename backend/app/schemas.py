@@ -13,6 +13,9 @@ class ChatRequest(BaseModel):
     session_id: UUID = Field(default_factory=uuid4)
     message: str = Field(min_length=1, max_length=10_000)
     history: list[Message] = Field(default_factory=list, max_length=30)
+    # Populated by the API from trusted server-side session state. Direct client
+    # values are overwritten at the route boundary.
+    previous_plan: "QueryPlan | None" = None
 
 
 class ToolExecution(BaseModel):
@@ -65,6 +68,13 @@ class ChatResponse(BaseModel):
     usage: dict[str, Any] | None = None
     tool_executions: list[ToolExecution] = Field(default_factory=list)
     suggested_actions: list[str] = Field(default_factory=list)
+    query_plan: QueryPlan | None = None
+
+
+class ConversationState(BaseModel):
+    session_id: UUID
+    history: list[Message] = Field(default_factory=list, max_length=12)
+    last_plan: QueryPlan | None = None
 
 
 class ProviderResponse(BaseModel):
