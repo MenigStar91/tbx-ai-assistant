@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from app.data.base import DatasetCatalogProtocol
 from app.data.catalog import DatasetCatalog
 from app.data.display import PREFERRED_DISPLAY_COLUMNS
 from app.data.projections import from_clause

@@ -3,7 +3,7 @@
 **A finance assistant that answers plain-language questions from real data, and
 refuses when it cannot.**
 
-TBX · BVP Tech Catalyst Hackathon · branch `fifi-integration`
+TBX · BVP Tech Catalyst Hackathon · branch `main`
 
 ---
 
@@ -151,7 +151,9 @@ it, we do not show the number.**
 
 ## 7. Measured results
 
-23 questions, 9 capabilities, four backends, same question set.
+23 questions, 9 capabilities, four backends, same question set. These are
+in-process diagnostics; release evidence is produced separately through
+`evals/run_http.py`, which sends every question to the deployed API with curl.
 
 | Backend | Params | Accuracy | Refusals | Tokens | Median | p95 |
 |---|---|---|---|---|---|---|
@@ -190,7 +192,7 @@ backend/app/
   data/
     projections.py   the safe surface, defined once, inlined per query
     mysql_source.py  read-only MySQL catalog
-    catalog.py       file/DuckDB catalog for local work
+    mysql_catalog.py live schema discovery and safe MySQL query surface
     query_engine.py  plan → parameterised SQL → result + reconciliation check
     dialect.py       MySQL portability rules
   providers/         keyword | ollama/openai-compatible | sarvam, with fallback
@@ -200,11 +202,11 @@ scripts/             MySQL setup, portability verifier, data generator
 
 **3,847 lines of source, 902 lines of tests, 92 tests passing.**
 
-Switching data source is one environment variable:
+Switching from the local sample to TBX changes only the read connection:
 
 ```bash
-DATA_BACKEND=files   DATA_DIRECTORY=data/tbx     # local, DuckDB over files
-DATA_BACKEND=mysql   MYSQL_HOST=… MYSQL_USER=…   # TBX, SELECT-only
+MYSQL_READ_HOST=db                                      # local seeded MySQL
+MYSQL_READ_HOST=… MYSQL_READ_USER=… MYSQL_READ_PASSWORD=… # TBX, SELECT-only
 ```
 
 Nothing downstream knows which engine it is on. The same generated SQL runs on
@@ -238,7 +240,7 @@ cd frontend && npm run dev            # http://localhost:5173
 
 ```bash
 cd backend && ../.venv/bin/python -m pytest tests -q        # 92 passed
-.venv/bin/python evals/run.py --provider openai             # accuracy by capability
+python evals/run_http.py --model-label qwen2.5-1.5b         # deployed API via curl
 scripts/verify_mysql.sh tbx fifi fifi                       # MySQL portability
 ```
 

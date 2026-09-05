@@ -22,35 +22,12 @@ import re
 from difflib import SequenceMatcher
 from datetime import date, timedelta
 
-SPEND_WORDS = {
-    "spend", "spent", "spending", "paid", "pay", "pays", "payment", "payments",
-    "outflow", "outflows", "debit", "debits", "outgoing", "withdrawal", "withdrawals",
-}
-RECEIVE_WORDS = {
-    "receive", "received", "receiving", "receipt", "receipts", "credit", "credits",
-    "inflow", "inflows", "incoming", "deposit", "deposits",
-}
-
-
-def _mentions(question: str, words: set[str]) -> bool:
-    """Recognise a financial direction while tolerating a small typo."""
-    from app.assistant.guards import looks_like_typo
-
-    return any(
-        token in words or looks_like_typo(token, words)
-        for token in re.findall(r"[a-zA-Z]{3,}", question.lower())
-    )
-
-
 # words that mean the user actually asked for a breakdown
 SPEND_WORDS = {"spend", "spent", "spending", "paid", "pay", "pays", "payment",
-               "payments", "outflow", "outflows", "debit", "debits", "outgoing"}
+               "payments", "outflow", "outflows", "debit", "debits", "outgoing",
+               "withdrawal", "withdrawals"}
 RECEIVE_WORDS = {"receive", "received", "receiving", "receipt", "receipts", "credit",
                  "credits", "inflow", "inflows", "incoming", "deposit", "deposits"}
-
-SPEND_RE = re.compile(r"\b(" + "|".join(sorted(SPEND_WORDS)) + r")\b", re.IGNORECASE)
-RECEIVED_RE = re.compile(r"\b(" + "|".join(sorted(RECEIVE_WORDS)) + r")\b", re.IGNORECASE)
-
 
 def _mentions(question: str, words: set[str]) -> bool:
     """Does the question ask about this direction, allowing for a typo?
@@ -234,7 +211,7 @@ def repair_plan(
             if score > best_score:
                 best, best_score = name, score
         if best and best_score >= 0.6:
-            repairs.append(f'resolved table {plan.get("dataset")} -> {best}')
+            repairs.append(f'resolved dataset {plan.get("dataset")} -> {best}')
             plan["dataset"] = best
 
     # ---- 0c. the chosen table cannot answer this plan -------------------------
@@ -252,7 +229,7 @@ def repair_plan(
                     if needed <= {c["name"] for c in cols}]
             if len(fits) == 1 and fits[0] != plan.get("dataset"):
                 repairs.append(
-                    f'moved to {fits[0]}: {plan.get("dataset")} has no '
+                    f'moved dataset {plan.get("dataset")} -> {fits[0]}: missing '
                     f'{", ".join(sorted(needed - chosen_columns))}'
                 )
                 plan["dataset"] = fits[0]
@@ -423,14 +400,22 @@ def repair_plan(
     if real_columns and "transaction_type" in real_columns:
         wants_spend = _mentions(question, SPEND_WORDS)
         wants_received = _mentions(question, RECEIVE_WORDS)
-        already = any(f.get("column") == "transaction_type" for f in (plan.get("filters") or []))
-        if not already and wants_spend != wants_received:
+        if wants_spend != wants_received:
             direction = "debit" if wants_spend else "credit"
-            plan["filters"] = (plan.get("filters") or []) + [
+            other_filters = [
+                item for item in (plan.get("filters") or [])
+                if item.get("column") != "transaction_type"
+            ]
+            previous_direction = next(
+                (item.get("value") for item in (plan.get("filters") or [])
+                 if item.get("column") == "transaction_type"),
+                None,
+            )
+            plan["filters"] = other_filters + [
                 {"column": "transaction_type", "operator": "eq", "value": direction}
             ]
             repairs.append(
-                f"filtered to {direction}s "
+                f"{'corrected' if previous_direction else 'filtered'} to {direction}s "
                 f"(the question asks about money going {'out' if wants_spend else 'in'})"
             )
 

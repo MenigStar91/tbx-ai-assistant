@@ -55,27 +55,6 @@ def _widens_scope(question: str) -> bool:
         bool(BARE_TOTAL_RE.search(question)) and len(question.split()) <= 4
     )
 
-# A follow-up can widen as well as narrow. "And total spent?" after "spend at
-# HDFC" is asking across every bank, but filters are inherited by default, so
-# without this it silently re-answers the HDFC question and looks identical.
-BROADEN_RE = re.compile(
-    r"\b(in\s+total|overall|altogether|combined|in\s+aggregate|as\s+a\s+whole|"
-    r"across\s+all|all\s+banks|all\s+accounts|everything|every\s+bank)\b",
-    re.IGNORECASE,
-)
-# a bare "total" only widens in a short follow-up with nothing else in it
-BARE_TOTAL_RE = re.compile(r"\btotals?\b", re.IGNORECASE)
-
-
-def _wants_everything(question: str) -> bool:
-    if BROADEN_RE.search(question):
-        return True
-    if not BARE_TOTAL_RE.search(question):
-        return False
-    words = re.findall(r"[a-zA-Z]+", question)
-    return len(words) <= 4
-
-
 def merge_follow_up(current: QueryPlan, previous: QueryPlan | None, question: str) -> tuple[QueryPlan, list[str]]:
     """Merge a new validated plan with trusted prior state.
 
@@ -100,17 +79,6 @@ def merge_follow_up(current: QueryPlan, previous: QueryPlan | None, question: st
         updates["group_by"] = previous.group_by
 
     current_filters = list(current.filters)
-
-    # widening: keep the dataset and the metric, drop the narrowing the previous
-    # question applied, and record it so the change is visible rather than silent
-    if _wants_everything(question):
-        dropped = [f.column for f in previous.filters if f.column not in {c.column for c in current_filters}]
-        if dropped:
-            repairs.append(
-                f"widened: dropped {', '.join(sorted(set(dropped)))} from the previous question"
-            )
-        updates["filters"] = current_filters
-        return current.model_copy(update=updates), repairs
 
     remove_columns: set[str] = set()
     lowered = question.lower()

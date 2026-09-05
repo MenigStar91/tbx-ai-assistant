@@ -42,7 +42,7 @@ expose `account_last4` and a boolean `utr_available` instead.
 - Cached semantic aliases and a top-3-table/top-20-column planner context
 - Confidence signalling based on whether matching evidence exists
 - Mock mode for developing without API credits
-- Replaceable model provider, initially wired for Sarvam AI
+- Replaceable Sarvam and OpenAI-compatible model providers
 
 The TBX relationship is `bank 1—N account 1—N transaction`. The language model queries only safe semantic views; it never generates joins or sees the raw sensitive columns.
 
@@ -97,7 +97,7 @@ frontend/                 React + TypeScript chat and evidence UI
 backend/app/api/          Chat, upload, catalog and export endpoints
 backend/app/assistant/    Planning and grounded explanation workflow
 backend/app/data/         MySQL introspection, sample ingestion and deterministic query engine
-backend/app/providers/    Mock and Sarvam model adapters
+backend/app/providers/    Mock, Sarvam and OpenAI-compatible adapters
 backend/app/tools/        Extension point for problem-specific tools
 backend/tests/            Guardrail and computation tests
 data/uploads/             Local sample-ingestion CSVs only; contents are gitignored
@@ -118,7 +118,7 @@ Open the UI at http://localhost:5173, API docs at http://localhost:8000/docs,
 health endpoint at http://localhost:8000/api/v1/health, and the judge-friendly
 system contract at http://localhost:8000/api/v1/info.
 
-The default `LLM_PROVIDER=mock` requires no API key and demonstrates the grounded path with a basic count plan. For meaningful natural-language planning, configure the model selected after TBX shares its model-efficiency guidance.
+The default `LLM_PROVIDER=mock` requires no API key and demonstrates the grounded path with a basic count plan. It is not valid evidence of language-model accuracy. Qwen 2.5 1.5B is the current demo choice based on the FiFi diagnostic; Qwen, Llama and Sarvam must still pass the committed HTTP release gate before a final production claim is made.
 
 ## Configure Sarvam AI
 
@@ -130,7 +130,30 @@ SARVAM_API_KEY=your_key
 SARVAM_MODEL=sarvam-105b
 ```
 
-The provider interface is deliberately replaceable. The final lightweight model should be chosen only after the model-efficiency scoring note and capped credits are provided. A locally hosted model can be added as another `LLMProvider` without changing the assistant workflow.
+For local Qwen or Llama evaluation through Ollama, use the same API workflow:
+
+```env
+LLM_PROVIDER=openai
+LLM_FALLBACK_TO_MOCK=false
+OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+OPENAI_MODEL=qwen2.5:1.5b
+```
+
+Change only `OPENAI_MODEL=llama3.2:3b` to test Llama. When running the API outside Docker, use `http://127.0.0.1:11434/v1`. The provider interface is deliberately replaceable; switching models does not change the assistant workflow or public API.
+
+For a real TBX connection, replace the local read settings without changing the
+API:
+
+```env
+MYSQL_READ_HOST=your-read-replica
+MYSQL_PORT=3306
+MYSQL_DATABASE=tbx
+MYSQL_READ_USER=fifi_readonly
+MYSQL_READ_PASSWORD=your_secret
+```
+
+The runtime MySQL user needs `SELECT` only. `MYSQL_WRITE_*` settings belong
+only to the local CSV seed job and must not be used by the API.
 
 ## Load the local sample database
 
@@ -178,18 +201,21 @@ Do not place placeholder numeric answers in the final presentation. Save the exa
 
 | Criterion | Implementation |
 |---|---|
-| Accuracy and grounding | Allowlisted query plans, parameterized filters and deterministic MySQL computation |
-| Model efficiency | Replaceable provider; model choice deferred until official scoring guidance arrives |
+| Accuracy and grounding | Allowlisted query plans, parameterized filters and deterministic SQL computation |
+| Model efficiency | One planning call; Qwen 2.5 1.5B demo choice plus Llama and Sarvam comparisons |
 | Natural-language understanding | Model translates intent, filters, dates and follow-up context into structured plans |
 | Functionality | Chat, upload, query, evidence and export endpoints |
 | User experience | Evidence shown inline with confidence and one-click CSV export |
 | Explainability | Dataset, calculation summary, columns and source rows returned with every answer |
 | Hallucination control | Missing data, invalid columns and ambiguous questions return clarification rather than a number |
 
-The final model scorecard measures answer accuracy, exact intent/query-plan
-generation, correct refusals, evidence fidelity, tokens and P95 latency. Current
-results are deliberately marked pending after the schema change; see
-[Model Scorecard](docs/evaluation/MODEL_SCORECARD.md) and [Evaluation Status](EVAL.md).
+The final scorecard measures answer accuracy, exact intent/query-plan generation,
+correct refusals, evidence fidelity, tokens and P95 latency through the deployed
+HTTP API. Run it with `python evals/run_http.py --model-label <name>` and compare
+saved JSON reports with `python evals/compare_http.py`. The prior three-model
+comparison is explicitly withdrawn because all models hit the same integration
+failure; see [Model Scorecard](docs/evaluation/MODEL_SCORECARD.md) and
+[Evaluation Status](EVAL.md).
 
 ## Data and reconciliation boundaries
 
@@ -223,7 +249,7 @@ quarantine and issue workflow is specified in
 - One message produces one query plan; independent multi-question batching is not supported
 - Mock mode validates plumbing, not language understanding
 - Authentication and multi-tenancy are intentionally excluded by the problem scope
-- Model choice and accuracy metrics remain open pending TBX guidance and credits
+- Qwen 2.5 1.5B is the preliminary demo choice; final production selection remains gated on three reproducible FiFi HTTP runs per candidate
 
 ## Testing
 

@@ -21,6 +21,9 @@ operations and evaluation so hack-day changes stay local and reviewable.
 
 - [Model scorecard and release gate](evaluation/MODEL_SCORECARD.md)
 - [Executable golden questions](../evals/questions.json)
+- [Black-box HTTP golden questions](../evals/http_questions.json)
+- [Curl-backed HTTP evaluator](../evals/run_http.py)
+- [HTTP result comparison](../evals/compare_http.py)
 
 ## 5. Repository operations
 
