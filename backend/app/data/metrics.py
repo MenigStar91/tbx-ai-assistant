@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS query_log (
 
 
 class MetricsStore:
-    def __init__(self, path: str = "data/metrics.db"):
+    def __init__(self, path: str = "data/runtime/metrics.db"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
