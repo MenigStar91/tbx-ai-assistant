@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -22,6 +23,10 @@ from app.data.catalog import safe_name
 
 
 class DatabaseQueryError(ValueError):
+    pass
+
+
+class QueryPolicyError(ValueError):
     pass
 
 
@@ -43,15 +48,21 @@ class CursorAdapter:
 class MySQLConnectionAdapter:
     """Small execute-style wrapper used by the existing grounded engine."""
 
-    def __init__(self, connection):
+    def __init__(self, connection, max_query_cost: float, explain_analyze: bool):
         self.raw = connection
+        self.max_query_cost = max_query_cost
+        self.explain_analyze = explain_analyze
+
+    @staticmethod
+    def _mysql_sql(sql: str) -> str:
+        sql = re.sub(r'"([a-zA-Z0-9_]+)"', r'`\1`', sql)
+        sql = re.sub(r"\bAS\s+VARCHAR\b", "AS CHAR", sql, flags=re.IGNORECASE)
+        return sql.replace("?", "%s")
 
     def execute(self, sql: str, parameters: list[Any] | tuple[Any, ...] | None = None):
         # SQL is generated internally after allowlist validation. Translate the
         # engine's neutral identifier/parameter syntax to MySQL's DB-API syntax.
-        sql = re.sub(r'"([a-zA-Z0-9_]+)"', r'`\1`', sql)
-        sql = re.sub(r"\bAS\s+VARCHAR\b", "AS CHAR", sql, flags=re.IGNORECASE)
-        sql = sql.replace("?", "%s")
+        sql = self._mysql_sql(sql)
         cursor = self.raw.cursor()
         try:
             cursor.execute(sql, tuple(parameters or ()))
@@ -59,6 +70,46 @@ class MySQLConnectionAdapter:
             cursor.close()
             raise DatabaseQueryError("the validated query could not be executed by MySQL") from exc
         return CursorAdapter(cursor)
+
+    @staticmethod
+    def _query_cost(node: Any) -> float | None:
+        if isinstance(node, dict):
+            cost = node.get("query_cost")
+            if cost is not None:
+                try:
+                    return float(cost)
+                except (TypeError, ValueError):
+                    pass
+            for value in node.values():
+                found = MySQLConnectionAdapter._query_cost(value)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = MySQLConnectionAdapter._query_cost(value)
+                if found is not None:
+                    return found
+        return None
+
+    def validate_cost(self, sql: str, parameters: list[Any]) -> float | None:
+        mysql_sql = self._mysql_sql(sql)
+        cursor = self.raw.cursor()
+        try:
+            cursor.execute("EXPLAIN FORMAT=JSON " + mysql_sql, tuple(parameters))
+            payload = cursor.fetchone()[0]
+            cost = self._query_cost(json.loads(payload))
+            if cost is not None and cost > self.max_query_cost:
+                raise QueryPolicyError(
+                    f"estimated MySQL query cost {cost:.1f} exceeds the configured limit"
+                )
+            if self.explain_analyze:
+                cursor.execute("EXPLAIN ANALYZE " + mysql_sql, tuple(parameters))
+                cursor.fetchall()
+            return cost
+        except mysql.connector.Error as exc:
+            raise DatabaseQueryError("MySQL could not explain the validated query") from exc
+        finally:
+            cursor.close()
 
     def close(self) -> None:
         self.raw.close()
@@ -78,7 +129,14 @@ class MySQLDatasetCatalog:
         password: str,
         upload_directory: str,
         data_max_date: str | None = None,
+        max_result_rows: int = 200,
+        query_timeout_ms: int = 5_000,
+        max_query_cost: float = 100_000.0,
+        explain_analyze: bool = False,
+        require_time_filter_tables: set[str] | None = None,
     ):
+        if not re.fullmatch(r"[a-zA-Z0-9_]{1,64}", database):
+            raise ValueError("MySQL database name contains unsupported characters")
         self.options = {
             "host": host,
             "port": port,
@@ -89,15 +147,52 @@ class MySQLDatasetCatalog:
         self.database = database
         self.upload_directory = Path(upload_directory)
         self.data_max_date = data_max_date
+        self.max_result_rows = max_result_rows
+        self.query_timeout_ms = query_timeout_ms
+        self.max_query_cost = max_query_cost
+        self.explain_analyze = explain_analyze
+        self.require_time_filter_tables = require_time_filter_tables or set()
         self.upload_directory.mkdir(parents=True, exist_ok=True)
         self._catalog_cache: dict[str, list[dict[str, str]]] | None = None
         self._lock = RLock()
 
     def _raw_connection(self):
-        return mysql.connector.connect(**self.options)
+        connection = mysql.connector.connect(
+            **self.options,
+            connection_timeout=max(1, self.query_timeout_ms // 1000),
+        )
+        cursor = connection.cursor()
+        cursor.execute("SET SESSION MAX_EXECUTION_TIME = %s", (self.query_timeout_ms,))
+        cursor.close()
+        return connection
 
     def connection(self) -> MySQLConnectionAdapter:
-        return MySQLConnectionAdapter(self._raw_connection())
+        return MySQLConnectionAdapter(
+            self._raw_connection(), self.max_query_cost, self.explain_analyze
+        )
+
+    def validate_plan(self, plan) -> None:
+        if plan.dataset not in self.require_time_filter_tables:
+            return
+        columns = {item["name"]: item["type"].upper() for item in self.describe().get(plan.dataset, [])}
+        has_time_scope = any(
+            item.operator in {"gte", "gt", "lte", "lt"}
+            and any(token in columns.get(item.column, "") for token in ("DATE", "TIME"))
+            for item in plan.filters
+        )
+        point_lookup = any(
+            item.operator == "eq"
+            and (
+                item.column in {"transaction_id", "transaction_reference_id"}
+                or item.column.endswith("_reference_id")
+            )
+            for item in plan.filters
+        )
+        if not has_time_scope and not point_lookup:
+            raise QueryPolicyError(
+                f"broad queries on {plan.dataset} require a date/time filter; "
+                "an exact transaction/reference lookup is exempt"
+            )
 
     def refresh(self) -> dict[str, list[dict[str, str]]]:
         with self._lock:
@@ -222,44 +317,104 @@ class MySQLDatasetCatalog:
             imported.append(self.import_csv(path.name, path.read_bytes()))
         return imported
 
+    def provision_read_user(self, username: str, password: str) -> None:
+        """Local-demo provisioning. Production credentials are supplied by TBX."""
+        if not re.fullmatch(r"[a-zA-Z0-9_]{1,32}", username):
+            raise ValueError("MySQL read username contains unsupported characters")
+        escaped_password = password.replace("'", "''")
+        connection = self._raw_connection()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                f"CREATE USER IF NOT EXISTS '{username}'@'%' IDENTIFIED BY '{escaped_password}'"
+            )
+            cursor.execute(f"GRANT SELECT ON `{self.database}`.* TO '{username}'@'%'")
+            connection.commit()
+        finally:
+            cursor.close()
+            connection.close()
+
+    def _ensure_index(self, cursor, table: str, name: str, columns: list[str]) -> None:
+        cursor.execute(
+            """SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s""",
+            (self.database, table),
+        )
+        available = {row[0] for row in cursor.fetchall()}
+        if not set(columns) <= available:
+            return
+        cursor.execute(
+            """SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+               WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND INDEX_NAME=%s LIMIT 1""",
+            (self.database, table, name),
+        )
+        if cursor.fetchone() is None:
+            quoted = ", ".join(f"`{column}`" for column in columns)
+            cursor.execute(f"CREATE INDEX `{name}` ON `{table}` ({quoted})")
+
     def create_safe_views(self) -> None:
         """Expose privacy-safe views; add optional TBX joins when those sources exist."""
         connection = self._raw_connection()
         cursor = connection.cursor()
-        cursor.execute(
-            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=%s AND TABLE_NAME LIKE 'source\\_%'",
-            (self.database,),
-        )
-        sources = {row[0] for row in cursor.fetchall()}
-        for source in sources:
-            public = source.removeprefix("source_")
+        try:
             cursor.execute(
-                """SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-                   WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION""",
-                (self.database, source),
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_SCHEMA=%s AND TABLE_NAME LIKE 'source\\_%'",
+                (self.database,),
             )
-            names = [row[0] for row in cursor.fetchall()]
-            selections = []
-            for name in names:
-                if self.SENSITIVE_RE.search(name):
-                    if name.lower() == "utr_number":
-                        selections.append(f"(`{name}` IS NOT NULL AND TRIM(`{name}`) <> '') AS `utr_available`")
-                    continue
-                if name.lower() == "account_number":
-                    selections.append(f"RIGHT(CAST(`{name}` AS CHAR), 4) AS `account_last4`")
-                    continue
-                selections.append(f"`{name}`")
-            if selections:
-                cursor.execute(f"CREATE OR REPLACE VIEW `{public}` AS SELECT {', '.join(selections)} FROM `{source}`")
+            sources = {row[0] for row in cursor.fetchall()}
+            for source in sources:
+                public = source.removeprefix("source_")
+                cursor.execute(
+                    """SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                       WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION""",
+                    (self.database, source),
+                )
+                names = [row[0] for row in cursor.fetchall()]
+                selections = []
+                for name in names:
+                    if self.SENSITIVE_RE.search(name):
+                        if name.lower() == "utr_number":
+                            selections.append(f"(`{name}` IS NOT NULL AND TRIM(`{name}`) <> '') AS `utr_available`")
+                        continue
+                    if name.lower() == "account_number":
+                        selections.append(f"RIGHT(CAST(`{name}` AS CHAR), 4) AS `account_last4`")
+                        continue
+                    selections.append(f"`{name}`")
+                if selections:
+                    cursor.execute(
+                        f"CREATE OR REPLACE VIEW `{public}` AS "
+                        f"SELECT {', '.join(selections)} FROM `{source}`"
+                    )
 
-        if {"source_bank", "source_account", "source_transaction"} <= sources:
-            cursor.execute("""CREATE OR REPLACE VIEW `account` AS
+            if {"source_bank", "source_account", "source_transaction"} <= sources:
+                # Cover the demonstrated lookup, period, type, bank/account join and
+                # aggregate paths. Production indexes must be reviewed against TBX
+                # workload telemetry and EXPLAIN output.
+                self._ensure_index(cursor, "source_bank", "idx_bank_code", ["bank_code"])
+                self._ensure_index(cursor, "source_account", "idx_account_id", ["account_id"])
+                self._ensure_index(
+                    cursor, "source_account", "idx_account_bank", ["bank_code", "account_id"]
+                )
+                self._ensure_index(
+                    cursor, "source_transaction", "idx_txn_reference",
+                    ["transaction_reference_id"]
+                )
+                self._ensure_index(
+                    cursor, "source_transaction", "idx_txn_account_date",
+                    ["account_id", "transaction_date"]
+                )
+                self._ensure_index(
+                    cursor, "source_transaction", "idx_txn_type_date_amount",
+                    ["transaction_type", "transaction_date", "transaction_amount"]
+                )
+                cursor.execute("""CREATE OR REPLACE VIEW `account` AS
                 SELECT CAST(a.account_id AS CHAR) account_id, CAST(a.entity_id AS CHAR) entity_id,
                        RIGHT(CAST(a.account_number AS CHAR),4) account_last4, a.program_id,
                        a.available_balance, CAST(a.bank_code AS CHAR) bank_code,
                        CAST(b.bank_name AS CHAR) bank_name
                   FROM source_account a LEFT JOIN source_bank b ON a.bank_code=b.bank_code""")
-            cursor.execute("""CREATE OR REPLACE VIEW `transaction` AS
+                cursor.execute("""CREATE OR REPLACE VIEW `transaction` AS
                 SELECT CAST(t.transaction_id AS CHAR) transaction_id,
                        CAST(t.account_id AS CHAR) account_id, CAST(a.entity_id AS CHAR) entity_id,
                        CAST(a.bank_code AS CHAR) bank_code, CAST(b.bank_name AS CHAR) bank_name,
@@ -270,6 +425,10 @@ class MySQLDatasetCatalog:
                        (t.utr_number IS NOT NULL AND TRIM(CAST(t.utr_number AS CHAR)) <> '') utr_available
                   FROM source_transaction t LEFT JOIN source_account a ON t.account_id=a.account_id
                   LEFT JOIN source_bank b ON a.bank_code=b.bank_code""")
-        connection.commit()
-        cursor.close()
-        connection.close()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+            connection.close()
